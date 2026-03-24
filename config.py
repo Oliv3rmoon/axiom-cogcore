@@ -1,0 +1,64 @@
+from __future__ import annotations
+import os
+import torch
+
+# Backend connection
+BACKEND_URL = os.getenv("BACKEND_URL", "https://axiom-backend-production-dfba.up.railway.app")
+
+# Server
+PORT = int(os.getenv("PORT", 8080))
+
+# Device auto-detection
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# World Model (GPU-scaled)
+WORLD_MODEL_HIDDEN_DIM = 512
+WORLD_MODEL_LATENT_DIM = 128
+WORLD_MODEL_OBS_DIM = 1024
+WORLD_MODEL_ACTION_DIM = 27
+WORLD_MODEL_LR = 3e-4
+WORLD_MODEL_BATCH_SIZE = 64
+WORLD_MODEL_SEQUENCE_LENGTH = 32
+WORLD_MODEL_KL_BETA = 1.0
+WORLD_MODEL_TRAIN_EVERY = 10  # Train after every N new experiences
+
+# Continual Learning
+EWC_LAMBDA = 5000.0
+REPLAY_BUFFER_SIZE = 10000
+REPLAY_RATIO = 0.1
+
+# Curiosity
+RND_EMBEDDING_DIM = 512
+CURIOSITY_DECAY = 0.995
+PREDICTION_ERROR_THRESHOLD = 0.5
+
+# Abstraction
+META_LESSON_MIN_EXAMPLES = 5
+PRINCIPLE_CONFIDENCE_THRESHOLD = 0.7
+
+# Reasoning
+MAX_THOUGHT_NODES = 500
+THOUGHT_TTL_HOURS = 72
+
+# Self-Model
+SELF_STATE_DIM = 64
+CAPABILITY_UPDATE_INTERVAL = 3600
+
+# Embeddings - GPU uses bge-large, CPU falls back to MiniLM
+if DEVICE == "cuda":
+    EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
+else:
+    EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+# Action types AXIOM uses
+ACTION_TYPES = [
+    "research", "read_codebase", "propose_change", "build_and_test",
+    "email", "text", "runpod", "reflect", "plan", "analyze",
+    "debug", "refactor", "deploy", "monitor", "review",
+    "document", "test", "optimize", "migrate", "configure",
+    "integrate", "automate", "learn", "teach", "collaborate",
+    "create", "delete"
+]
+
+# Database
+DB_PATH = os.getenv("DB_PATH", "cogcore.db")
