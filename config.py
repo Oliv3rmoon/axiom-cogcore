@@ -1,6 +1,5 @@
 from __future__ import annotations
 import os
-import torch
 
 # Backend connection
 BACKEND_URL = os.getenv("BACKEND_URL", "https://axiom-backend-production-dfba.up.railway.app")
@@ -8,8 +7,18 @@ BACKEND_URL = os.getenv("BACKEND_URL", "https://axiom-backend-production-dfba.up
 # Server
 PORT = int(os.getenv("PORT", 8080))
 
-# Device auto-detection
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Device — set DEVICE env var to skip torch import at config load time.
+# On Railway: DEVICE=cpu. On RunPod: DEVICE=cuda.
+# If not set, auto-detected (triggers torch import).
+_DEVICE_ENV = os.getenv("DEVICE", "")
+if _DEVICE_ENV:
+    DEVICE = _DEVICE_ENV
+else:
+    try:
+        import torch as _torch
+        DEVICE = "cuda" if _torch.cuda.is_available() else "cpu"
+    except ImportError:
+        DEVICE = "cpu"
 
 # World Model (GPU-scaled)
 WORLD_MODEL_HIDDEN_DIM = 512
@@ -45,10 +54,10 @@ SELF_STATE_DIM = 64
 CAPABILITY_UPDATE_INTERVAL = 3600
 
 # Embeddings - GPU uses bge-large, CPU falls back to MiniLM
-if DEVICE == "cuda":
-    EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
-else:
-    EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL = os.getenv(
+    "EMBEDDING_MODEL",
+    "BAAI/bge-large-en-v1.5" if DEVICE == "cuda" else "all-MiniLM-L6-v2"
+)
 
 # Action types AXIOM uses
 ACTION_TYPES = [

@@ -11,48 +11,16 @@ from contextlib import asynccontextmanager
 from functools import wraps
 from typing import Optional
 
-import numpy as np
-import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import config
 from shared.db import get_db, close_db
-from shared.embeddings import EmbeddingService
-from shared.backend_client import BackendClient
-from world_model.model import RSSMWorldModel
-from world_model.trainer import WorldModelTrainer
-from world_model.buffer import ExperienceBuffer, Experience
-from curiosity.curiosity_manager import CuriosityManager
-from continual.ewc import EWC
-from continual.consolidator import Consolidator
-from continual.replay import ReplayManager
-from abstraction.principle_extractor import PrincipleExtractor
-from abstraction.meta_learner import MetaLearner
-from abstraction.skill_composer import SkillComposer
-from reasoning.workspace import ReasoningWorkspace
-from self_model.state_tracker import StateTracker
-from self_model.capability_model import CapabilityModel
-from self_model.transition_model import TransitionModel
 
-# Phase 2 imports
-from beta_vae.model import BetaVAE
-from beta_vae.trainer import BetaVAETrainer
-from beta_vae.representations import RepresentationEngine
-from active_inference.generative_model import GenerativeModel
-from active_inference.expected_free_energy import expected_free_energy as compute_efe
-from active_inference.policy_selection import compare_policies, recommend_action
-from active_inference.precision import PrecisionController
-from hopfield.episodic_store import EpisodicStore
-from hopfield.memory_manager import MemoryManager
-from meta_learning.reptile import Reptile
-from meta_learning.task_sampler import TaskSampler
-from meta_learning.adaptation import DomainAdapter
-
-# Phase 3 imports are LAZY — loaded inside _load_all_models() to avoid
-# crashing the server if Phase 3 modules have import issues.
-# The modules are accessed via globals set during background init.
+# ALL heavy imports (numpy, torch, Phase 1-4 modules) are LAZY.
+# They are imported inside _load_all_models() so the server can start
+# accepting /health requests immediately without waiting for torch to load.
 
 logger = logging.getLogger("axiom-cogcore")
 
@@ -61,32 +29,33 @@ logger = logging.getLogger("axiom-cogcore")
 # Global components (initialized in background)
 # ──────────────────────────────────────────────
 
-embedder: EmbeddingService | None = None
-backend: BackendClient | None = None
-world_model: RSSMWorldModel | None = None
-trainer: WorldModelTrainer | None = None
-curiosity_manager: CuriosityManager | None = None
-ewc: EWC | None = None
-consolidator: Consolidator | None = None
-principle_extractor: PrincipleExtractor | None = None
-meta_learner: MetaLearner | None = None
-skill_composer: SkillComposer | None = None
-reasoning_ws: ReasoningWorkspace | None = None
-state_tracker: StateTracker | None = None
-capability_model: CapabilityModel | None = None
-transition_model: TransitionModel | None = None
+# Phase 1 globals (lazy loaded)
+embedder = None
+backend = None
+world_model = None
+trainer = None
+curiosity_manager = None
+ewc = None
+consolidator = None
+principle_extractor = None
+meta_learner = None
+skill_composer = None
+reasoning_ws = None
+state_tracker = None
+capability_model = None
+transition_model = None
 
-# Phase 2 globals
-beta_vae_model: BetaVAE | None = None
-beta_vae_trainer: BetaVAETrainer | None = None
-rep_engine: RepresentationEngine | None = None
-gen_model: GenerativeModel | None = None
-precision_ctrl: PrecisionController | None = None
-episodic_store: EpisodicStore | None = None
-memory_mgr: MemoryManager | None = None
-reptile: Reptile | None = None
-task_sampler: TaskSampler | None = None
-domain_adapter: DomainAdapter | None = None
+# Phase 2 globals (lazy loaded)
+beta_vae_model = None
+beta_vae_trainer = None
+rep_engine = None
+gen_model = None
+precision_ctrl = None
+episodic_store = None
+memory_mgr = None
+reptile = None
+task_sampler = None
+domain_adapter = None
 
 # Phase 3 globals (types are not imported at module level — lazy loaded)
 dc_library = None
@@ -94,6 +63,15 @@ gw = None
 gw_registry = None
 gw_broadcaster = None
 causal_scm = None
+# Lazy-loaded library references (set in background loader)
+np = None   # numpy
+torch = None
+
+# Phase 2 lazy-loaded function references
+_compute_efe = None
+_compare_policies = None
+_recommend_action = None
+
 # Phase 3 lazy-loaded function references
 _wake_solve = None
 _abstraction_sleep = None
@@ -186,9 +164,50 @@ async def _load_all_models():
     global dc_library, gw, gw_registry, gw_broadcaster, causal_scm
     global attention_schema, attention_meta, attention_awareness
     global pred_hierarchy, liquid_model
+    global np, torch
+    global _compute_efe, _compare_policies, _recommend_action
     global _init_error
 
     try:
+        # ── Lazy imports for Phase 1+2 ──────────────
+        import numpy as _np
+        import torch as _torch
+        np = _np
+        torch = _torch
+
+        from shared.embeddings import EmbeddingService
+        from shared.backend_client import BackendClient
+        from world_model.model import RSSMWorldModel
+        from world_model.trainer import WorldModelTrainer
+        from world_model.buffer import Experience
+        from curiosity.curiosity_manager import CuriosityManager
+        from continual.ewc import EWC
+        from continual.consolidator import Consolidator
+        from continual.replay import ReplayManager
+        from abstraction.principle_extractor import PrincipleExtractor
+        from abstraction.meta_learner import MetaLearner as _MetaLearner
+        from abstraction.skill_composer import SkillComposer
+        from reasoning.workspace import ReasoningWorkspace
+        from self_model.state_tracker import StateTracker
+        from self_model.capability_model import CapabilityModel
+        from self_model.transition_model import TransitionModel
+        from beta_vae.model import BetaVAE
+        from beta_vae.trainer import BetaVAETrainer
+        from beta_vae.representations import RepresentationEngine
+        from active_inference.generative_model import GenerativeModel
+        from active_inference.expected_free_energy import expected_free_energy
+        from active_inference.policy_selection import compare_policies, recommend_action
+        from active_inference.precision import PrecisionController
+        from hopfield.episodic_store import EpisodicStore
+        from hopfield.memory_manager import MemoryManager
+        from meta_learning.reptile import Reptile
+        from meta_learning.task_sampler import TaskSampler
+        from meta_learning.adaptation import DomainAdapter
+
+        _compute_efe = expected_free_energy
+        _compare_policies = compare_policies
+        _recommend_action = recommend_action
+
         # ── Phase 1 ──────────────────────────────
 
         # Embeddings (heaviest — downloads model on first run)
@@ -222,7 +241,7 @@ async def _load_all_models():
 
         # Abstraction
         principle_extractor = PrincipleExtractor(embedder, backend)
-        meta_learner = MetaLearner(embedder, backend)
+        meta_learner = _MetaLearner(embedder, backend)
         skill_composer = SkillComposer(embedder, backend)
         _component_status["abstraction"] = True
 
@@ -539,6 +558,7 @@ async def wm_update(req: UpdateRequest):
         _correct_predictions += 1
 
     # Store experience in buffer
+    from world_model.buffer import Experience
     exp = Experience(
         state_embedding=cached["state_embedding"],
         action=req.action,
@@ -646,7 +666,8 @@ async def continual_consolidate():
 @requires_ready("continual_learning")
 async def continual_status():
     status = consolidator.get_status()
-    replay_stats = await ReplayManager(trainer.buffer).get_stats()
+    from continual.replay import ReplayManager as _RM
+    replay_stats = await _RM(trainer.buffer).get_stats()
     status["replay_buffer_fill"] = replay_stats["buffer_fill"]
     return status
 
@@ -896,18 +917,18 @@ async def beta_vae_stats():
 @app.post("/active-inference/evaluate-policy")
 @requires_ready("active_inference")
 async def ai_evaluate_policy(req: EvaluatePolicyRequest):
-    efe_result = compute_efe(
+    efe_result = _compute_efe(
         gen_model, req.current_state, req.proposed_action,
         req.goal, precision_ctrl.precision,
     )
-    efe_result["recommendation"] = recommend_action(efe_result)
+    efe_result["recommendation"] = _recommend_action(efe_result)
     return efe_result
 
 
 @app.post("/active-inference/compare-policies")
 @requires_ready("active_inference")
 async def ai_compare_policies(req: ComparePoliciesRequest):
-    result = compare_policies(
+    result = _compare_policies(
         gen_model, req.current_state, req.policies,
         req.goal, precision_ctrl.precision,
     )
