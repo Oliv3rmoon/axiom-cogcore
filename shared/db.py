@@ -139,5 +139,64 @@ async def _init_tables(db: aiosqlite.Connection):
             adaptation_speed REAL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+        -- Phase 3: DreamCoder library primitives
+        CREATE TABLE IF NOT EXISTS library_primitives (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            pattern TEXT NOT NULL,
+            steps TEXT,
+            domains TEXT,
+            frequency INTEGER DEFAULT 1,
+            success_rate REAL DEFAULT 0.5,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Phase 3: DreamCoder solved tasks
+        CREATE TABLE IF NOT EXISTS solved_tasks (
+            id TEXT PRIMARY KEY,
+            task TEXT NOT NULL,
+            domain TEXT,
+            solution_steps TEXT,
+            was_successful INTEGER DEFAULT 1,
+            primitives_used TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Phase 3: Global Workspace broadcast history
+        CREATE TABLE IF NOT EXISTS workspace_broadcasts (
+            id TEXT PRIMARY KEY,
+            source_module TEXT NOT NULL,
+            signal_type TEXT NOT NULL,
+            content TEXT,
+            salience REAL NOT NULL,
+            urgency REAL DEFAULT 0.5,
+            received_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Phase 3: Global Workspace module registry
+        CREATE TABLE IF NOT EXISTS workspace_modules (
+            name TEXT PRIMARY KEY,
+            status TEXT DEFAULT 'active',
+            interests TEXT,
+            broadcasts_sent INTEGER DEFAULT 0,
+            broadcasts_received INTEGER DEFAULT 0,
+            last_broadcast DATETIME,
+            registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Phase 3: Causal relationships
+        CREATE TABLE IF NOT EXISTS causal_edges (
+            id TEXT PRIMARY KEY,
+            cause TEXT NOT NULL,
+            effect TEXT NOT NULL,
+            strength REAL NOT NULL,
+            evidence_count INTEGER DEFAULT 0,
+            mechanism TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(cause, effect)
+        );
     """)
     await db.commit()

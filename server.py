@@ -50,6 +50,19 @@ from meta_learning.reptile import Reptile
 from meta_learning.task_sampler import TaskSampler
 from meta_learning.adaptation import DomainAdapter
 
+# Phase 3 imports
+from dreamcoder.library import Library as DreamcoderLibrary
+from dreamcoder.wake import wake_solve
+from dreamcoder.sleep import abstraction_sleep
+from dreamcoder.synthesizer import compose_solution
+from global_workspace.workspace import GlobalWorkspace
+from global_workspace.module_registry import ModuleRegistry
+from global_workspace.broadcaster import Broadcaster, Signal
+from causal.scm import StructuralCausalModel
+from causal.do_calculus import do_intervention
+from causal.counterfactual import counterfactual_query
+from causal.causal_learner import learn_causal_structure
+
 logger = logging.getLogger("axiom-cogcore")
 
 
@@ -84,6 +97,13 @@ reptile: Reptile | None = None
 task_sampler: TaskSampler | None = None
 domain_adapter: DomainAdapter | None = None
 
+# Phase 3 globals
+dc_library: DreamcoderLibrary | None = None
+gw: GlobalWorkspace | None = None
+gw_registry: ModuleRegistry | None = None
+gw_broadcaster: Broadcaster | None = None
+causal_scm: StructuralCausalModel | None = None
+
 # Prediction cache: prediction_id -> {embedding, h, z, action}
 _prediction_cache: dict[str, dict] = {}
 _experience_count = 0
@@ -107,6 +127,9 @@ _component_status: dict[str, bool] = {
     "active_inference": False,
     "hopfield_memory": False,
     "meta_learning": False,
+    "dreamcoder": False,
+    "global_workspace": False,
+    "causal_reasoner": False,
 }
 _init_error: str | None = None
 _background_task: asyncio.Task | None = None
@@ -151,6 +174,7 @@ async def _load_all_models():
     global reasoning_ws, state_tracker, capability_model, transition_model
     global beta_vae_model, beta_vae_trainer, rep_engine, gen_model, precision_ctrl
     global episodic_store, memory_mgr, reptile, task_sampler, domain_adapter
+    global dc_library, gw, gw_registry, gw_broadcaster, causal_scm
     global _init_error
 
     try:
@@ -229,6 +253,28 @@ async def _load_all_models():
         task_sampler = TaskSampler()
         domain_adapter = DomainAdapter(reptile, embedder)
         _component_status["meta_learning"] = True
+
+        # ── Phase 3 ──────────────────────────────
+
+        # DreamCoder
+        logger.info("Loading DreamCoder library...")
+        dc_library = DreamcoderLibrary(embedder)
+        await dc_library.load_from_db()
+        _component_status["dreamcoder"] = True
+
+        # Global Workspace
+        gw_registry = ModuleRegistry()
+        gw_registry.register_defaults()
+        await gw_registry.load_from_db()
+        gw_broadcaster = Broadcaster(gw_registry)
+        gw = GlobalWorkspace(gw_registry, gw_broadcaster)
+        _component_status["global_workspace"] = True
+
+        # Causal Reasoner
+        logger.info("Loading causal model...")
+        causal_scm = StructuralCausalModel()
+        await causal_scm.load_from_db()
+        _component_status["causal_reasoner"] = True
 
         logger.info("All components loaded.")
 
@@ -883,3 +929,196 @@ async def meta_train_step(req: MetaTrainStepRequest):
 @requires_ready("meta_learning")
 async def meta_status():
     return reptile.get_status()
+
+
+# ══════════════════════════════════════════════
+# PHASE 3 ENDPOINTS
+# ══════════════════════════════════════════════
+
+# ──────────────────────────────────────────────
+# Phase 3 Request Models
+# ──────────────────────────────────────────────
+
+class DreamcoderWakeRequest(BaseModel):
+    task: str
+    context: str = ""
+
+class DreamcoderSleepRequest(BaseModel):
+    min_solutions: int = config.DREAMCODER_MIN_SOLUTIONS
+
+class DreamcoderComposeRequest(BaseModel):
+    task: str
+    domain: str = ""
+
+class WorkspaceBroadcastRequest(BaseModel):
+    source_module: str
+    signal_type: str
+    content: dict = {}
+    salience: float = 0.5
+    urgency: float = 0.5
+
+class WorkspaceSubscribeRequest(BaseModel):
+    module_name: str
+    interests: list = []
+
+class CausalAddRequest(BaseModel):
+    cause: str
+    effect: str
+    strength: float = 0.5
+    evidence_count: int = 1
+    mechanism: str = ""
+
+class CausalInterveneRequest(BaseModel):
+    intervention: str
+    given: dict = {}
+    query: str = "success"
+
+class CausalCounterfactualRequest(BaseModel):
+    actual_action: str
+    actual_outcome: str
+    counterfactual: str
+
+class CausalLearnRequest(BaseModel):
+    min_evidence: int = config.CAUSAL_MIN_EVIDENCE
+
+
+# ──────────────────────────────────────────────
+# DreamCoder Abstraction
+# ──────────────────────────────────────────────
+
+@app.post("/dreamcoder/wake")
+@requires_ready("dreamcoder", "embeddings")
+async def dreamcoder_wake(req: DreamcoderWakeRequest):
+    task_text = req.task
+    if req.context:
+        task_text += " " + req.context
+    result = wake_solve(task_text, dc_library, embedder)
+    return result
+
+
+@app.post("/dreamcoder/sleep")
+@requires_ready("dreamcoder", "embeddings")
+async def dreamcoder_sleep_endpoint(req: DreamcoderSleepRequest):
+    new_prims = await abstraction_sleep(dc_library, embedder, backend, req.min_solutions)
+    total = dc_library.size
+    return {
+        "new_primitives": [p.to_dict() for p in new_prims],
+        "library_size": total,
+        "compression_ratio": round(len(new_prims) / max(1, total), 3),
+    }
+
+
+@app.get("/dreamcoder/library")
+@requires_ready("dreamcoder")
+async def dreamcoder_library():
+    prims = [p.to_dict() for p in dc_library.primitives.values()]
+    prims.sort(key=lambda p: p["frequency"], reverse=True)
+    return {
+        "primitives": prims,
+        "total": len(prims),
+    }
+
+
+@app.post("/dreamcoder/compose")
+@requires_ready("dreamcoder", "embeddings")
+async def dreamcoder_compose(req: DreamcoderComposeRequest):
+    result = await compose_solution(req.task, req.domain, dc_library, embedder)
+    return result
+
+
+# ──────────────────────────────────────────────
+# Global Workspace
+# ──────────────────────────────────────────────
+
+@app.post("/workspace/broadcast")
+@requires_ready("global_workspace")
+async def workspace_broadcast(req: WorkspaceBroadcastRequest):
+    signal = Signal(
+        source_module=req.source_module,
+        signal_type=req.signal_type,
+        content=req.content,
+        salience=req.salience,
+        urgency=req.urgency,
+    )
+    result = await gw.submit_and_compete(signal)
+    return result
+
+
+@app.get("/workspace/current")
+@requires_ready("global_workspace")
+async def workspace_current():
+    return gw.get_current()
+
+
+@app.get("/workspace/modules")
+@requires_ready("global_workspace")
+async def workspace_modules():
+    return {"modules": gw_registry.get_all()}
+
+
+@app.post("/workspace/subscribe")
+@requires_ready("global_workspace")
+async def workspace_subscribe(req: WorkspaceSubscribeRequest):
+    gw.subscribe(req.module_name, req.interests)
+    return {"subscribed": True}
+
+
+# ──────────────────────────────────────────────
+# Causal Reasoner
+# ──────────────────────────────────────────────
+
+@app.post("/causal/add-relationship")
+@requires_ready("causal_reasoner")
+async def causal_add(req: CausalAddRequest):
+    edge = causal_scm.add_edge(
+        req.cause, req.effect, req.strength, req.evidence_count, req.mechanism
+    )
+    await causal_scm.save_all()
+    return {
+        "relationship_id": edge.id,
+        "total_relationships": len(causal_scm.get_all_edges()),
+    }
+
+
+@app.post("/causal/intervene")
+@requires_ready("causal_reasoner")
+async def causal_intervene(req: CausalInterveneRequest):
+    # Parse intervention string like "do(action=propose_change)"
+    intervention_var = req.intervention
+    value = True
+    if intervention_var.startswith("do(") and intervention_var.endswith(")"):
+        inner = intervention_var[3:-1]
+        if "=" in inner:
+            parts = inner.split("=", 1)
+            intervention_var = parts[0].strip()
+            value = parts[1].strip()
+
+    result = do_intervention(causal_scm, intervention_var, value, req.query, req.given)
+    return result
+
+
+@app.post("/causal/counterfactual")
+@requires_ready("causal_reasoner")
+async def causal_counterfactual(req: CausalCounterfactualRequest):
+    result = counterfactual_query(
+        causal_scm, req.actual_action, req.actual_outcome, req.counterfactual
+    )
+    return result
+
+
+@app.get("/causal/graph")
+@requires_ready("causal_reasoner")
+async def causal_graph():
+    return {
+        "nodes": causal_scm.get_all_nodes(),
+        "edges": causal_scm.get_all_edges(),
+        "total_nodes": len(causal_scm.get_all_nodes()),
+        "total_edges": len(causal_scm.get_all_edges()),
+    }
+
+
+@app.post("/causal/learn")
+@requires_ready("causal_reasoner")
+async def causal_learn(req: CausalLearnRequest):
+    result = await learn_causal_structure(causal_scm, backend, req.min_evidence)
+    return result
