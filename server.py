@@ -50,18 +50,9 @@ from meta_learning.reptile import Reptile
 from meta_learning.task_sampler import TaskSampler
 from meta_learning.adaptation import DomainAdapter
 
-# Phase 3 imports
-from dreamcoder.library import Library as DreamcoderLibrary
-from dreamcoder.wake import wake_solve
-from dreamcoder.sleep import abstraction_sleep
-from dreamcoder.synthesizer import compose_solution
-from global_workspace.workspace import GlobalWorkspace
-from global_workspace.module_registry import ModuleRegistry
-from global_workspace.broadcaster import Broadcaster, Signal
-from causal.scm import StructuralCausalModel
-from causal.do_calculus import do_intervention
-from causal.counterfactual import counterfactual_query
-from causal.causal_learner import learn_causal_structure
+# Phase 3 imports are LAZY — loaded inside _load_all_models() to avoid
+# crashing the server if Phase 3 modules have import issues.
+# The modules are accessed via globals set during background init.
 
 logger = logging.getLogger("axiom-cogcore")
 
@@ -97,12 +88,20 @@ reptile: Reptile | None = None
 task_sampler: TaskSampler | None = None
 domain_adapter: DomainAdapter | None = None
 
-# Phase 3 globals
-dc_library: DreamcoderLibrary | None = None
-gw: GlobalWorkspace | None = None
-gw_registry: ModuleRegistry | None = None
-gw_broadcaster: Broadcaster | None = None
-causal_scm: StructuralCausalModel | None = None
+# Phase 3 globals (types are not imported at module level — lazy loaded)
+dc_library = None
+gw = None
+gw_registry = None
+gw_broadcaster = None
+causal_scm = None
+# Phase 3 lazy-loaded function references
+_wake_solve = None
+_abstraction_sleep = None
+_compose_solution = None
+_do_intervention = None
+_counterfactual_query = None
+_learn_causal_structure = None
+_Signal = None
 
 # Prediction cache: prediction_id -> {embedding, h, z, action}
 _prediction_cache: dict[str, dict] = {}
@@ -254,33 +253,67 @@ async def _load_all_models():
         domain_adapter = DomainAdapter(reptile, embedder)
         _component_status["meta_learning"] = True
 
-        # ── Phase 3 ──────────────────────────────
+        logger.info("Phase 1+2 components loaded.")
+
+    except Exception as exc:
+        _init_error = traceback.format_exc()
+        logger.error("Phase 1/2 init failed: %s", _init_error)
+
+    # ── Phase 3 (isolated — failures here don't affect P1/P2) ──────
+    try:
+        global _wake_solve, _abstraction_sleep, _compose_solution
+        global _do_intervention, _counterfactual_query, _learn_causal_structure, _Signal
+
+        # Lazy imports for Phase 3
+        from dreamcoder.library import Library as _DreamcoderLibrary
+        from dreamcoder.wake import wake_solve as _ws
+        from dreamcoder.sleep import abstraction_sleep as _as
+        from dreamcoder.synthesizer import compose_solution as _cs
+        from global_workspace.workspace import GlobalWorkspace as _GW
+        from global_workspace.module_registry import ModuleRegistry as _MR
+        from global_workspace.broadcaster import Broadcaster as _BC, Signal as _Sig
+        from causal.scm import StructuralCausalModel as _SCM
+        from causal.do_calculus import do_intervention as _di
+        from causal.counterfactual import counterfactual_query as _cq
+        from causal.causal_learner import learn_causal_structure as _lcs
+
+        _wake_solve = _ws
+        _abstraction_sleep = _as
+        _compose_solution = _cs
+        _do_intervention = _di
+        _counterfactual_query = _cq
+        _learn_causal_structure = _lcs
+        _Signal = _Sig
 
         # DreamCoder
         logger.info("Loading DreamCoder library...")
-        dc_library = DreamcoderLibrary(embedder)
+        dc_library = _DreamcoderLibrary(embedder)
         await dc_library.load_from_db()
         _component_status["dreamcoder"] = True
 
         # Global Workspace
-        gw_registry = ModuleRegistry()
+        gw_registry = _MR()
         gw_registry.register_defaults()
         await gw_registry.load_from_db()
-        gw_broadcaster = Broadcaster(gw_registry)
-        gw = GlobalWorkspace(gw_registry, gw_broadcaster)
+        gw_broadcaster = _BC(gw_registry)
+        gw = _GW(gw_registry, gw_broadcaster)
         _component_status["global_workspace"] = True
 
         # Causal Reasoner
         logger.info("Loading causal model...")
-        causal_scm = StructuralCausalModel()
+        causal_scm = _SCM()
         await causal_scm.load_from_db()
         _component_status["causal_reasoner"] = True
 
-        logger.info("All components loaded.")
+        logger.info("All components loaded (Phase 1+2+3).")
 
     except Exception as exc:
-        _init_error = traceback.format_exc()
-        logger.error("Background init failed: %s", _init_error)
+        p3_err = traceback.format_exc()
+        logger.error("Phase 3 init failed (P1/P2 still running): %s", p3_err)
+        if _init_error:
+            _init_error += "\n--- Phase 3 ---\n" + p3_err
+        else:
+            _init_error = "Phase 3: " + p3_err
 
 
 # ──────────────────────────────────────────────
@@ -992,14 +1025,14 @@ async def dreamcoder_wake(req: DreamcoderWakeRequest):
     task_text = req.task
     if req.context:
         task_text += " " + req.context
-    result = wake_solve(task_text, dc_library, embedder)
+    result = _wake_solve(task_text, dc_library, embedder)
     return result
 
 
 @app.post("/dreamcoder/sleep")
 @requires_ready("dreamcoder", "embeddings")
 async def dreamcoder_sleep_endpoint(req: DreamcoderSleepRequest):
-    new_prims = await abstraction_sleep(dc_library, embedder, backend, req.min_solutions)
+    new_prims = await _abstraction_sleep(dc_library, embedder, backend, req.min_solutions)
     total = dc_library.size
     return {
         "new_primitives": [p.to_dict() for p in new_prims],
@@ -1022,7 +1055,7 @@ async def dreamcoder_library():
 @app.post("/dreamcoder/compose")
 @requires_ready("dreamcoder", "embeddings")
 async def dreamcoder_compose(req: DreamcoderComposeRequest):
-    result = await compose_solution(req.task, req.domain, dc_library, embedder)
+    result = await _compose_solution(req.task, req.domain, dc_library, embedder)
     return result
 
 
@@ -1033,7 +1066,7 @@ async def dreamcoder_compose(req: DreamcoderComposeRequest):
 @app.post("/workspace/broadcast")
 @requires_ready("global_workspace")
 async def workspace_broadcast(req: WorkspaceBroadcastRequest):
-    signal = Signal(
+    signal = _Signal(
         source_module=req.source_module,
         signal_type=req.signal_type,
         content=req.content,
@@ -1093,14 +1126,14 @@ async def causal_intervene(req: CausalInterveneRequest):
             intervention_var = parts[0].strip()
             value = parts[1].strip()
 
-    result = do_intervention(causal_scm, intervention_var, value, req.query, req.given)
+    result = _do_intervention(causal_scm, intervention_var, value, req.query, req.given)
     return result
 
 
 @app.post("/causal/counterfactual")
 @requires_ready("causal_reasoner")
 async def causal_counterfactual(req: CausalCounterfactualRequest):
-    result = counterfactual_query(
+    result = _counterfactual_query(
         causal_scm, req.actual_action, req.actual_outcome, req.counterfactual
     )
     return result
@@ -1120,5 +1153,5 @@ async def causal_graph():
 @app.post("/causal/learn")
 @requires_ready("causal_reasoner")
 async def causal_learn(req: CausalLearnRequest):
-    result = await learn_causal_structure(causal_scm, backend, req.min_evidence)
+    result = await _learn_causal_structure(causal_scm, backend, req.min_evidence)
     return result
