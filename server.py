@@ -32,6 +32,20 @@ from self_model.state_tracker import StateTracker
 from self_model.capability_model import CapabilityModel
 from self_model.transition_model import TransitionModel
 
+# Phase 2 imports
+from beta_vae.model import BetaVAE
+from beta_vae.trainer import BetaVAETrainer
+from beta_vae.representations import RepresentationEngine
+from active_inference.generative_model import GenerativeModel
+from active_inference.expected_free_energy import expected_free_energy as compute_efe
+from active_inference.policy_selection import compare_policies, recommend_action
+from active_inference.precision import PrecisionController
+from hopfield.episodic_store import EpisodicStore
+from hopfield.memory_manager import MemoryManager
+from meta_learning.reptile import Reptile
+from meta_learning.task_sampler import TaskSampler
+from meta_learning.adaptation import DomainAdapter
+
 
 # ──────────────────────────────────────────────
 # Global components (initialized on startup)
@@ -52,6 +66,18 @@ state_tracker: StateTracker | None = None
 capability_model: CapabilityModel | None = None
 transition_model: TransitionModel | None = None
 
+# Phase 2 globals
+beta_vae_model: BetaVAE | None = None
+beta_vae_trainer: BetaVAETrainer | None = None
+rep_engine: RepresentationEngine | None = None
+gen_model: GenerativeModel | None = None
+precision_ctrl: PrecisionController | None = None
+episodic_store: EpisodicStore | None = None
+memory_mgr: MemoryManager | None = None
+reptile: Reptile | None = None
+task_sampler: TaskSampler | None = None
+domain_adapter: DomainAdapter | None = None
+
 # Prediction cache: prediction_id -> {embedding, h, z, action}
 _prediction_cache: dict[str, dict] = {}
 _experience_count = 0
@@ -66,6 +92,8 @@ async def lifespan(app: FastAPI):
     global embedder, backend, world_model, trainer, curiosity_manager
     global ewc, consolidator, principle_extractor, meta_learner, skill_composer
     global reasoning_ws, state_tracker, capability_model, transition_model
+    global beta_vae_model, beta_vae_trainer, rep_engine, gen_model, precision_ctrl
+    global episodic_store, memory_mgr, reptile, task_sampler, domain_adapter
 
     # Initialize database
     await get_db()
@@ -105,6 +133,28 @@ async def lifespan(app: FastAPI):
     state_tracker = StateTracker(backend)
     capability_model = CapabilityModel(backend)
     transition_model = TransitionModel(state_tracker, capability_model, embedder, backend)
+
+    # Phase 2 initialization
+    # β-VAE
+    input_dim = embedder.dim
+    beta_vae_model = BetaVAE(input_dim=input_dim).to(config.DEVICE)
+    beta_vae_trainer = BetaVAETrainer(beta_vae_model)
+    rep_engine = RepresentationEngine(beta_vae_model, embedder)
+
+    # Active Inference
+    gen_model = GenerativeModel(world_model, embedder)
+    precision_ctrl = PrecisionController()
+    await precision_ctrl.load_latest()
+
+    # Hopfield Episodic Memory
+    episodic_store = EpisodicStore(embedder)
+    await episodic_store.load_from_db()
+    memory_mgr = MemoryManager(episodic_store)
+
+    # Meta-Learning (Reptile)
+    reptile = Reptile(world_model)
+    task_sampler = TaskSampler()
+    domain_adapter = DomainAdapter(reptile, embedder)
 
     yield
 
@@ -183,6 +233,10 @@ async def health():
         "abstraction": principle_extractor is not None,
         "reasoning": reasoning_ws is not None,
         "self_model": state_tracker is not None,
+        "beta_vae": beta_vae_model is not None,
+        "active_inference": gen_model is not None,
+        "hopfield_memory": episodic_store is not None,
+        "meta_learning": reptile is not None,
     }
     return {
         "status": "alive",
@@ -519,3 +573,197 @@ async def self_model_predict_change(req: PredictChangeRequest):
             "side_effects": [str(e)],
             "recommendation": "defer",
         }
+
+
+# ══════════════════════════════════════════════
+# PHASE 2 ENDPOINTS
+# ══════════════════════════════════════════════
+
+# ──────────────────────────────────────────────
+# Phase 2 Request Models
+# ──────────────────────────────────────────────
+
+class BetaVAEEncodeRequest(BaseModel):
+    text: str
+
+class BetaVAESimilarityRequest(BaseModel):
+    text_a: str
+    text_b: str
+
+class BetaVAEGenerateRequest(BaseModel):
+    base_text: str
+    modify: dict = {}
+
+class EvaluatePolicyRequest(BaseModel):
+    current_state: str
+    proposed_action: str
+    goal: str
+
+class ComparePoliciesRequest(BaseModel):
+    current_state: str
+    policies: list
+    goal: str
+
+class UpdateBeliefsRequest(BaseModel):
+    action_taken: str
+    observation: str
+    was_expected: bool = True
+
+class HopfieldStoreRequest(BaseModel):
+    content: str
+    context: str = ""
+    importance: float = 0.5
+
+class HopfieldRetrieveRequest(BaseModel):
+    query: str
+    top_k: int = 5
+
+class HopfieldAssociateRequest(BaseModel):
+    pattern_id: str
+
+class MetaAdaptRequest(BaseModel):
+    domain: str
+    examples: list = []
+    query: str = ""
+
+class MetaTrainStepRequest(BaseModel):
+    task_type: str = "action_selection"
+
+
+# ──────────────────────────────────────────────
+# β-VAE — Disentangled Representations
+# ──────────────────────────────────────────────
+
+@app.post("/beta-vae/encode")
+async def beta_vae_encode(req: BetaVAEEncodeRequest):
+    result = rep_engine.encode_text(req.text)
+    return result
+
+
+@app.post("/beta-vae/similarity")
+async def beta_vae_similarity(req: BetaVAESimilarityRequest):
+    result = rep_engine.compute_similarity(req.text_a, req.text_b)
+    return result
+
+
+@app.post("/beta-vae/generate")
+async def beta_vae_generate(req: BetaVAEGenerateRequest):
+    result = rep_engine.generate_from_modification(req.base_text, req.modify)
+    return result
+
+
+@app.get("/beta-vae/stats")
+async def beta_vae_stats():
+    return beta_vae_trainer.get_stats()
+
+
+# ──────────────────────────────────────────────
+# Active Inference — Unified Curiosity + Planning
+# ──────────────────────────────────────────────
+
+@app.post("/active-inference/evaluate-policy")
+async def ai_evaluate_policy(req: EvaluatePolicyRequest):
+    efe_result = compute_efe(
+        gen_model, req.current_state, req.proposed_action,
+        req.goal, precision_ctrl.precision,
+    )
+    efe_result["recommendation"] = recommend_action(efe_result)
+    return efe_result
+
+
+@app.post("/active-inference/compare-policies")
+async def ai_compare_policies(req: ComparePoliciesRequest):
+    result = compare_policies(
+        gen_model, req.current_state, req.policies,
+        req.goal, precision_ctrl.precision,
+    )
+    return result
+
+
+@app.post("/active-inference/update-beliefs")
+async def ai_update_beliefs(req: UpdateBeliefsRequest):
+    # Compute surprise based on whether outcome was expected
+    surprise = 0.3 if req.was_expected else 0.7
+    prediction_error = surprise
+
+    old_precision = precision_ctrl.precision
+    new_precision = precision_ctrl.update(prediction_error)
+    await precision_ctrl.persist()
+
+    return {
+        "belief_update_magnitude": round(abs(new_precision - old_precision), 4),
+        "surprise": round(surprise, 4),
+        "precision_updated": True,
+        "new_precision": round(new_precision, 4),
+    }
+
+
+@app.get("/active-inference/status")
+async def ai_status():
+    return precision_ctrl.get_status()
+
+
+# ──────────────────────────────────────────────
+# Modern Hopfield Memory
+# ──────────────────────────────────────────────
+
+@app.post("/hopfield/store")
+async def hopfield_store(req: HopfieldStoreRequest):
+    result = await episodic_store.store(req.content, req.context, req.importance)
+    return result
+
+
+@app.post("/hopfield/retrieve")
+async def hopfield_retrieve(req: HopfieldRetrieveRequest):
+    results = await episodic_store.retrieve(req.query, req.top_k)
+    return {"retrieved": results}
+
+
+@app.post("/hopfield/associate")
+async def hopfield_associate(req: HopfieldAssociateRequest):
+    results = await episodic_store.associate(req.pattern_id)
+    return {"associations": results}
+
+
+@app.get("/hopfield/stats")
+async def hopfield_stats():
+    return episodic_store.get_stats()
+
+
+# ──────────────────────────────────────────────
+# Meta-Learning (Reptile)
+# ──────────────────────────────────────────────
+
+@app.post("/meta-learning/adapt")
+async def meta_adapt(req: MetaAdaptRequest):
+    result = domain_adapter.predict_with_adaptation(
+        req.domain, req.query, req.examples,
+    )
+    return result
+
+
+@app.post("/meta-learning/train-step")
+async def meta_train_step(req: MetaTrainStepRequest):
+    tasks = await task_sampler.sample_tasks()
+    if not tasks:
+        return {
+            "meta_loss": 0.0,
+            "inner_steps": 0,
+            "outer_step": reptile.meta_step_count,
+            "note": "Not enough experience data for meta-learning",
+        }
+
+    def loss_fn(model, task_data):
+        losses = model.compute_loss(
+            task_data["obs"], task_data["actions"],
+            task_data["outcomes"], task_data["successes"],
+        )
+        return losses["loss"]
+
+    result = reptile.meta_step(tasks, loss_fn)
+    return result
+
+
+@app.get("/meta-learning/status")
+async def meta_status():
+    return reptile.get_status()

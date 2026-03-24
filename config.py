@@ -62,3 +62,33 @@ ACTION_TYPES = [
 
 # Database
 DB_PATH = os.getenv("DB_PATH", "cogcore.db")
+
+# ──────────────────────────────────────────────
+# Phase 2 Configuration
+# ──────────────────────────────────────────────
+
+# β-VAE
+BETA_VAE_LATENT_DIM = 32
+BETA_VAE_HIDDEN_DIM = 256
+BETA_VAE_BETA = 4.0
+BETA_VAE_CAPACITY_MAX = 25.0
+BETA_VAE_LR = 1e-4
+
+# Active Inference
+AI_PRECISION_INIT = 1.0
+AI_PRECISION_LR = 0.01
+AI_GAMMA = 1.0
+AI_EPISTEMIC_WEIGHT = 0.5
+AI_PLANNING_HORIZON = 3
+
+# Modern Hopfield
+HOPFIELD_PATTERN_DIM = 384
+HOPFIELD_MAX_PATTERNS = 10000
+HOPFIELD_BETA = 1.0
+HOPFIELD_CONSOLIDATION_THRESHOLD = 0.95
+
+# Meta-Learning (Reptile)
+REPTILE_INNER_LR = 0.01
+REPTILE_OUTER_LR = 0.001
+REPTILE_INNER_STEPS = 5
+REPTILE_TASKS_PER_UPDATE = 4

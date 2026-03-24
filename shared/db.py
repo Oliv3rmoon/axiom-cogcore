@@ -99,5 +99,45 @@ async def _init_tables(db: aiosqlite.Connection):
             stats_json TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+        -- Phase 2: β-VAE training data
+        CREATE TABLE IF NOT EXISTS vae_training_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            embedding BLOB NOT NULL,
+            source_text TEXT,
+            action_type TEXT,
+            was_successful INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Phase 2: Modern Hopfield patterns
+        CREATE TABLE IF NOT EXISTS hopfield_patterns (
+            id TEXT PRIMARY KEY,
+            pattern BLOB NOT NULL,
+            content TEXT NOT NULL,
+            context TEXT,
+            importance REAL DEFAULT 0.5,
+            access_count INTEGER DEFAULT 0,
+            last_accessed DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Phase 2: Active inference state
+        CREATE TABLE IF NOT EXISTS inference_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            precision REAL NOT NULL,
+            exploration_tendency REAL NOT NULL,
+            total_inferences INTEGER DEFAULT 0,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Phase 2: Meta-learning checkpoints
+        CREATE TABLE IF NOT EXISTS meta_checkpoints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            meta_step INTEGER NOT NULL,
+            domains_seen TEXT,
+            meta_loss REAL,
+            adaptation_speed REAL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     await db.commit()
