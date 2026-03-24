@@ -1,16 +1,20 @@
 from __future__ import annotations
 """AXIOM Cognitive Core v2 — FastAPI server with all endpoints."""
 
+import asyncio
+import logging
 import uuid
 import json
 import traceback
 from datetime import datetime
 from contextlib import asynccontextmanager
+from functools import wraps
 from typing import Optional
 
 import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import config
@@ -46,9 +50,11 @@ from meta_learning.reptile import Reptile
 from meta_learning.task_sampler import TaskSampler
 from meta_learning.adaptation import DomainAdapter
 
+logger = logging.getLogger("axiom-cogcore")
+
 
 # ──────────────────────────────────────────────
-# Global components (initialized on startup)
+# Global components (initialized in background)
 # ──────────────────────────────────────────────
 
 embedder: EmbeddingService | None = None
@@ -85,81 +91,173 @@ _total_predictions = 0
 _correct_predictions = 0
 _model_version = 0
 
+# ──────────────────────────────────────────────
+# Readiness tracking — updated as each component loads
+# ──────────────────────────────────────────────
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Initialize all components on startup, cleanup on shutdown."""
+_component_status: dict[str, bool] = {
+    "embeddings": False,
+    "world_model": False,
+    "curiosity": False,
+    "continual_learning": False,
+    "abstraction": False,
+    "reasoning": False,
+    "self_model": False,
+    "beta_vae": False,
+    "active_inference": False,
+    "hopfield_memory": False,
+    "meta_learning": False,
+}
+_init_error: str | None = None
+_background_task: asyncio.Task | None = None
+
+
+def _all_ready() -> bool:
+    return all(_component_status.values())
+
+
+# ──────────────────────────────────────────────
+# Guard decorator — returns 503 if component not ready
+# ──────────────────────────────────────────────
+
+def requires_ready(*component_names: str):
+    """Decorator: returns 503 JSON if any named component is not loaded yet."""
+    def decorator(fn):
+        @wraps(fn)
+        async def wrapper(*args, **kwargs):
+            missing = [c for c in component_names if not _component_status.get(c, False)]
+            if missing:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": "initializing",
+                        "ready": False,
+                        "waiting_for": missing,
+                    },
+                )
+            return await fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+# ──────────────────────────────────────────────
+# Background model loader
+# ──────────────────────────────────────────────
+
+async def _load_all_models():
+    """Load every model in the background. Updates _component_status as each finishes."""
     global embedder, backend, world_model, trainer, curiosity_manager
     global ewc, consolidator, principle_extractor, meta_learner, skill_composer
     global reasoning_ws, state_tracker, capability_model, transition_model
     global beta_vae_model, beta_vae_trainer, rep_engine, gen_model, precision_ctrl
     global episodic_store, memory_mgr, reptile, task_sampler, domain_adapter
+    global _init_error
 
-    # Initialize database
+    try:
+        # ── Phase 1 ──────────────────────────────
+
+        # Embeddings (heaviest — downloads model on first run)
+        logger.info("Loading embedding model...")
+        embedder = EmbeddingService.get_instance()
+        _component_status["embeddings"] = True
+        logger.info("Embeddings ready.")
+
+        # Backend client (instant)
+        backend = BackendClient()
+
+        # World model
+        logger.info("Loading world model...")
+        world_model = RSSMWorldModel().to(config.DEVICE)
+        trainer = WorldModelTrainer(world_model)
+        _component_status["world_model"] = True
+        logger.info("World model ready.")
+
+        # Curiosity
+        curiosity_manager = CuriosityManager()
+        _component_status["curiosity"] = True
+
+        # Continual learning
+        ewc = EWC(world_model)
+        consolidator = Consolidator(world_model, trainer, ewc)
+        await ewc.load_latest_checkpoint()
+        if ewc.is_initialized:
+            trainer.fisher_diag = ewc.fisher_diag
+            trainer.anchor_params = ewc.anchor_params
+        _component_status["continual_learning"] = True
+
+        # Abstraction
+        principle_extractor = PrincipleExtractor(embedder, backend)
+        meta_learner = MetaLearner(embedder, backend)
+        skill_composer = SkillComposer(embedder, backend)
+        _component_status["abstraction"] = True
+
+        # Reasoning
+        reasoning_ws = ReasoningWorkspace(embedder)
+        _component_status["reasoning"] = True
+
+        # Self-model
+        state_tracker = StateTracker(backend)
+        capability_model = CapabilityModel(backend)
+        transition_model = TransitionModel(state_tracker, capability_model, embedder, backend)
+        _component_status["self_model"] = True
+
+        # ── Phase 2 ──────────────────────────────
+
+        # β-VAE
+        logger.info("Loading β-VAE...")
+        input_dim = embedder.dim
+        beta_vae_model = BetaVAE(input_dim=input_dim).to(config.DEVICE)
+        beta_vae_trainer = BetaVAETrainer(beta_vae_model)
+        rep_engine = RepresentationEngine(beta_vae_model, embedder)
+        _component_status["beta_vae"] = True
+
+        # Active Inference
+        gen_model = GenerativeModel(world_model, embedder)
+        precision_ctrl = PrecisionController()
+        await precision_ctrl.load_latest()
+        _component_status["active_inference"] = True
+
+        # Hopfield Episodic Memory
+        logger.info("Loading Hopfield memory...")
+        episodic_store = EpisodicStore(embedder)
+        await episodic_store.load_from_db()
+        memory_mgr = MemoryManager(episodic_store)
+        _component_status["hopfield_memory"] = True
+
+        # Meta-Learning (Reptile)
+        reptile = Reptile(world_model)
+        task_sampler = TaskSampler()
+        domain_adapter = DomainAdapter(reptile, embedder)
+        _component_status["meta_learning"] = True
+
+        logger.info("All components loaded.")
+
+    except Exception as exc:
+        _init_error = traceback.format_exc()
+        logger.error("Background init failed: %s", _init_error)
+
+
+# ──────────────────────────────────────────────
+# Lifespan — only DB + kick off background loader
+# ──────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _background_task
+
+    # DB is tiny and instant — safe to do here
     await get_db()
 
-    # Initialize embedding service
-    embedder = EmbeddingService.get_instance()
-
-    # Initialize backend client
-    backend = BackendClient()
-
-    # Initialize world model
-    world_model = RSSMWorldModel().to(config.DEVICE)
-    trainer = WorldModelTrainer(world_model)
-
-    # Initialize curiosity
-    curiosity_manager = CuriosityManager()
-
-    # Initialize continual learning
-    ewc = EWC(world_model)
-    consolidator = Consolidator(world_model, trainer, ewc)
-
-    # Try to load latest EWC checkpoint
-    await ewc.load_latest_checkpoint()
-    if ewc.is_initialized:
-        trainer.fisher_diag = ewc.fisher_diag
-        trainer.anchor_params = ewc.anchor_params
-
-    # Initialize abstraction
-    principle_extractor = PrincipleExtractor(embedder, backend)
-    meta_learner = MetaLearner(embedder, backend)
-    skill_composer = SkillComposer(embedder, backend)
-
-    # Initialize reasoning
-    reasoning_ws = ReasoningWorkspace(embedder)
-
-    # Initialize self-model
-    state_tracker = StateTracker(backend)
-    capability_model = CapabilityModel(backend)
-    transition_model = TransitionModel(state_tracker, capability_model, embedder, backend)
-
-    # Phase 2 initialization
-    # β-VAE
-    input_dim = embedder.dim
-    beta_vae_model = BetaVAE(input_dim=input_dim).to(config.DEVICE)
-    beta_vae_trainer = BetaVAETrainer(beta_vae_model)
-    rep_engine = RepresentationEngine(beta_vae_model, embedder)
-
-    # Active Inference
-    gen_model = GenerativeModel(world_model, embedder)
-    precision_ctrl = PrecisionController()
-    await precision_ctrl.load_latest()
-
-    # Hopfield Episodic Memory
-    episodic_store = EpisodicStore(embedder)
-    await episodic_store.load_from_db()
-    memory_mgr = MemoryManager(episodic_store)
-
-    # Meta-Learning (Reptile)
-    reptile = Reptile(world_model)
-    task_sampler = TaskSampler()
-    domain_adapter = DomainAdapter(reptile, embedder)
+    # Fire off model loading in background so /health is reachable NOW
+    _background_task = asyncio.create_task(_load_all_models())
 
     yield
 
     # Cleanup
-    await backend.close()
+    if _background_task and not _background_task.done():
+        _background_task.cancel()
+    if backend:
+        await backend.close()
     await close_db()
 
 
@@ -220,29 +318,18 @@ class PredictChangeRequest(BaseModel):
 
 
 # ──────────────────────────────────────────────
-# Health
+# Health — always available, no guard
 # ──────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
-    components = {
-        "embeddings": embedder is not None,
-        "world_model": world_model is not None,
-        "curiosity": curiosity_manager is not None,
-        "continual_learning": ewc is not None,
-        "abstraction": principle_extractor is not None,
-        "reasoning": reasoning_ws is not None,
-        "self_model": state_tracker is not None,
-        "beta_vae": beta_vae_model is not None,
-        "active_inference": gen_model is not None,
-        "hopfield_memory": episodic_store is not None,
-        "meta_learning": reptile is not None,
-    }
     return {
         "status": "alive",
         "service": "AXIOM Cognitive Core v2",
         "device": config.DEVICE,
-        "components": components,
+        "ready": _all_ready(),
+        "components": dict(_component_status),
+        "init_error": _init_error,
     }
 
 
@@ -251,6 +338,7 @@ async def health():
 # ──────────────────────────────────────────────
 
 @app.post("/world-model/predict")
+@requires_ready("embeddings", "world_model")
 async def wm_predict(req: PredictRequest):
     global _total_predictions
 
@@ -299,11 +387,12 @@ async def wm_predict(req: PredictRequest):
         "confidence": round(predicted_success, 3),
         "predicted_success_probability": round(predicted_success, 3),
         "risk_factors": risk_factors,
-        "prediction_embedding": predicted_outcome_emb[:10].tolist(),  # First 10 dims for reference
+        "prediction_embedding": predicted_outcome_emb[:10].tolist(),
     }
 
 
 @app.post("/world-model/update")
+@requires_ready("embeddings", "world_model", "curiosity")
 async def wm_update(req: UpdateRequest):
     global _experience_count, _correct_predictions
 
@@ -361,6 +450,7 @@ async def wm_update(req: UpdateRequest):
 
 
 @app.get("/world-model/stats")
+@requires_ready("world_model", "continual_learning")
 async def wm_stats():
     buffer_count = await trainer.buffer.count()
     accuracy = _correct_predictions / max(1, _total_predictions)
@@ -383,6 +473,7 @@ async def wm_stats():
 # ──────────────────────────────────────────────
 
 @app.get("/curiosity/signals")
+@requires_ready("curiosity")
 async def curiosity_signals():
     signals = curiosity_manager.get_all_signals()
     top_targets = []
@@ -407,6 +498,7 @@ async def curiosity_signals():
 
 
 @app.post("/curiosity/evaluate-goal")
+@requires_ready("curiosity", "embeddings")
 async def curiosity_evaluate_goal(req: EvaluateGoalRequest):
     result = curiosity_manager.evaluate_goal(req.goal, embedder)
     return result
@@ -417,14 +509,15 @@ async def curiosity_evaluate_goal(req: EvaluateGoalRequest):
 # ──────────────────────────────────────────────
 
 @app.post("/continual/consolidate")
+@requires_ready("continual_learning", "curiosity")
 async def continual_consolidate():
     result = await consolidator.consolidate()
-    # Also persist curiosity signals
     await curiosity_manager.persist_signals()
     return result
 
 
 @app.get("/continual/status")
+@requires_ready("continual_learning")
 async def continual_status():
     status = consolidator.get_status()
     replay_stats = await ReplayManager(trainer.buffer).get_stats()
@@ -437,6 +530,7 @@ async def continual_status():
 # ──────────────────────────────────────────────
 
 @app.post("/abstraction/extract")
+@requires_ready("abstraction")
 async def abstraction_extract():
     try:
         new_principles = await principle_extractor.extract_principles()
@@ -458,6 +552,7 @@ async def abstraction_extract():
 
 
 @app.get("/abstraction/principles")
+@requires_ready("abstraction")
 async def abstraction_principles():
     principles = await principle_extractor.get_all_principles()
     return {
@@ -467,6 +562,7 @@ async def abstraction_principles():
 
 
 @app.post("/abstraction/apply")
+@requires_ready("abstraction")
 async def abstraction_apply(req: ApplyRequest):
     result = await principle_extractor.apply_principles(req.goal, req.action)
     return result
@@ -477,12 +573,14 @@ async def abstraction_apply(req: ApplyRequest):
 # ──────────────────────────────────────────────
 
 @app.post("/reasoning/start")
+@requires_ready("reasoning")
 async def reasoning_start(req: StartReasoningRequest):
     result = await reasoning_ws.start(req.goal, req.initial_context)
     return result
 
 
 @app.post("/reasoning/add-thought")
+@requires_ready("reasoning")
 async def reasoning_add_thought(req: AddThoughtRequest):
     try:
         result = await reasoning_ws.add_thought(
@@ -495,6 +593,7 @@ async def reasoning_add_thought(req: AddThoughtRequest):
 
 
 @app.post("/reasoning/add-causal-link")
+@requires_ready("reasoning")
 async def reasoning_add_causal_link(req: AddCausalLinkRequest):
     try:
         await reasoning_ws.add_causal_link(
@@ -507,6 +606,7 @@ async def reasoning_add_causal_link(req: AddCausalLinkRequest):
 
 
 @app.get("/reasoning/workspace/{workspace_id}")
+@requires_ready("reasoning")
 async def reasoning_get_workspace(workspace_id: str):
     result = await reasoning_ws.get_workspace(workspace_id)
     if "error" in result:
@@ -515,6 +615,7 @@ async def reasoning_get_workspace(workspace_id: str):
 
 
 @app.post("/reasoning/query")
+@requires_ready("reasoning")
 async def reasoning_query(req: QueryReasoningRequest):
     result = await reasoning_ws.query(req.workspace_id, req.question)
     return result
@@ -525,6 +626,7 @@ async def reasoning_query(req: QueryReasoningRequest):
 # ──────────────────────────────────────────────
 
 @app.get("/self-model/state")
+@requires_ready("self_model")
 async def self_model_state():
     try:
         state = await state_tracker.get_state()
@@ -537,7 +639,6 @@ async def self_model_state():
             "predicted_next_state": predictions,
         }
     except Exception as e:
-        # Return defaults if backend is unreachable
         return {
             "current_state": {
                 "active_goals": 0,
@@ -560,6 +661,7 @@ async def self_model_state():
 
 
 @app.post("/self-model/predict-change")
+@requires_ready("self_model")
 async def self_model_predict_change(req: PredictChangeRequest):
     try:
         result = await transition_model.predict_change(
@@ -635,24 +737,28 @@ class MetaTrainStepRequest(BaseModel):
 # ──────────────────────────────────────────────
 
 @app.post("/beta-vae/encode")
+@requires_ready("beta_vae")
 async def beta_vae_encode(req: BetaVAEEncodeRequest):
     result = rep_engine.encode_text(req.text)
     return result
 
 
 @app.post("/beta-vae/similarity")
+@requires_ready("beta_vae")
 async def beta_vae_similarity(req: BetaVAESimilarityRequest):
     result = rep_engine.compute_similarity(req.text_a, req.text_b)
     return result
 
 
 @app.post("/beta-vae/generate")
+@requires_ready("beta_vae")
 async def beta_vae_generate(req: BetaVAEGenerateRequest):
     result = rep_engine.generate_from_modification(req.base_text, req.modify)
     return result
 
 
 @app.get("/beta-vae/stats")
+@requires_ready("beta_vae")
 async def beta_vae_stats():
     return beta_vae_trainer.get_stats()
 
@@ -662,6 +768,7 @@ async def beta_vae_stats():
 # ──────────────────────────────────────────────
 
 @app.post("/active-inference/evaluate-policy")
+@requires_ready("active_inference")
 async def ai_evaluate_policy(req: EvaluatePolicyRequest):
     efe_result = compute_efe(
         gen_model, req.current_state, req.proposed_action,
@@ -672,6 +779,7 @@ async def ai_evaluate_policy(req: EvaluatePolicyRequest):
 
 
 @app.post("/active-inference/compare-policies")
+@requires_ready("active_inference")
 async def ai_compare_policies(req: ComparePoliciesRequest):
     result = compare_policies(
         gen_model, req.current_state, req.policies,
@@ -681,8 +789,8 @@ async def ai_compare_policies(req: ComparePoliciesRequest):
 
 
 @app.post("/active-inference/update-beliefs")
+@requires_ready("active_inference")
 async def ai_update_beliefs(req: UpdateBeliefsRequest):
-    # Compute surprise based on whether outcome was expected
     surprise = 0.3 if req.was_expected else 0.7
     prediction_error = surprise
 
@@ -699,6 +807,7 @@ async def ai_update_beliefs(req: UpdateBeliefsRequest):
 
 
 @app.get("/active-inference/status")
+@requires_ready("active_inference")
 async def ai_status():
     return precision_ctrl.get_status()
 
@@ -708,24 +817,28 @@ async def ai_status():
 # ──────────────────────────────────────────────
 
 @app.post("/hopfield/store")
+@requires_ready("hopfield_memory")
 async def hopfield_store(req: HopfieldStoreRequest):
     result = await episodic_store.store(req.content, req.context, req.importance)
     return result
 
 
 @app.post("/hopfield/retrieve")
+@requires_ready("hopfield_memory")
 async def hopfield_retrieve(req: HopfieldRetrieveRequest):
     results = await episodic_store.retrieve(req.query, req.top_k)
     return {"retrieved": results}
 
 
 @app.post("/hopfield/associate")
+@requires_ready("hopfield_memory")
 async def hopfield_associate(req: HopfieldAssociateRequest):
     results = await episodic_store.associate(req.pattern_id)
     return {"associations": results}
 
 
 @app.get("/hopfield/stats")
+@requires_ready("hopfield_memory")
 async def hopfield_stats():
     return episodic_store.get_stats()
 
@@ -735,6 +848,7 @@ async def hopfield_stats():
 # ──────────────────────────────────────────────
 
 @app.post("/meta-learning/adapt")
+@requires_ready("meta_learning")
 async def meta_adapt(req: MetaAdaptRequest):
     result = domain_adapter.predict_with_adaptation(
         req.domain, req.query, req.examples,
@@ -743,6 +857,7 @@ async def meta_adapt(req: MetaAdaptRequest):
 
 
 @app.post("/meta-learning/train-step")
+@requires_ready("meta_learning")
 async def meta_train_step(req: MetaTrainStepRequest):
     tasks = await task_sampler.sample_tasks()
     if not tasks:
@@ -765,5 +880,6 @@ async def meta_train_step(req: MetaTrainStepRequest):
 
 
 @app.get("/meta-learning/status")
+@requires_ready("meta_learning")
 async def meta_status():
     return reptile.get_status()
