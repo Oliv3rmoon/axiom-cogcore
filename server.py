@@ -290,96 +290,108 @@ async def _load_all_models():
         _init_error = traceback.format_exc()
         logger.error("Phase 1/2 init failed: %s", _init_error)
 
-    # ── Phase 3 (isolated — failures here don't affect P1/P2) ──────
-    try:
-        global _wake_solve, _abstraction_sleep, _compose_solution
-        global _do_intervention, _counterfactual_query, _learn_causal_structure, _Signal
+    # ── Phase 3+4: each component in its own try/except ──────
+    # If one component crashes (e.g. networkx SyntaxError in causal),
+    # all other components still load successfully.
 
-        # Lazy imports for Phase 3
+    def _record_error(component: str, err: str):
+        global _init_error
+        logger.error("%s init failed: %s", component, err)
+        if _init_error:
+            _init_error += f"\n--- {component} ---\n" + err
+        else:
+            _init_error = f"{component}: " + err
+
+    global _wake_solve, _abstraction_sleep, _compose_solution
+    global _do_intervention, _counterfactual_query, _learn_causal_structure, _Signal
+
+    # ── DreamCoder ──────
+    try:
         from dreamcoder.library import Library as _DreamcoderLibrary
         from dreamcoder.wake import wake_solve as _ws
         from dreamcoder.sleep import abstraction_sleep as _as
         from dreamcoder.synthesizer import compose_solution as _cs
-        from global_workspace.workspace import GlobalWorkspace as _GW
-        from global_workspace.module_registry import ModuleRegistry as _MR
-        from global_workspace.broadcaster import Broadcaster as _BC, Signal as _Sig
-        from causal.scm import StructuralCausalModel as _SCM
-        from causal.do_calculus import do_intervention as _di
-        from causal.counterfactual import counterfactual_query as _cq
-        from causal.causal_learner import learn_causal_structure as _lcs
-
         _wake_solve = _ws
         _abstraction_sleep = _as
         _compose_solution = _cs
-        _do_intervention = _di
-        _counterfactual_query = _cq
-        _learn_causal_structure = _lcs
-        _Signal = _Sig
-
-        # DreamCoder
         logger.info("Loading DreamCoder library...")
         dc_library = _DreamcoderLibrary(embedder)
         await dc_library.load_from_db()
         _component_status["dreamcoder"] = True
+        logger.info("DreamCoder ready.")
+    except Exception:
+        _record_error("dreamcoder", traceback.format_exc())
 
-        # Global Workspace
+    # ── Global Workspace ──────
+    try:
+        from global_workspace.workspace import GlobalWorkspace as _GW
+        from global_workspace.module_registry import ModuleRegistry as _MR
+        from global_workspace.broadcaster import Broadcaster as _BC, Signal as _Sig
+        _Signal = _Sig
         gw_registry = _MR()
         gw_registry.register_defaults()
         await gw_registry.load_from_db()
         gw_broadcaster = _BC(gw_registry)
         gw = _GW(gw_registry, gw_broadcaster)
         _component_status["global_workspace"] = True
+        logger.info("Global Workspace ready.")
+    except Exception:
+        _record_error("global_workspace", traceback.format_exc())
 
-        # Causal Reasoner
+    # ── Causal Reasoner ──────
+    try:
+        from causal.scm import StructuralCausalModel as _SCM
+        from causal.do_calculus import do_intervention as _di
+        from causal.counterfactual import counterfactual_query as _cq
+        from causal.causal_learner import learn_causal_structure as _lcs
+        _do_intervention = _di
+        _counterfactual_query = _cq
+        _learn_causal_structure = _lcs
         logger.info("Loading causal model...")
         causal_scm = _SCM()
         await causal_scm.load_from_db()
         _component_status["causal_reasoner"] = True
+        logger.info("Causal reasoner ready.")
+    except Exception:
+        _record_error("causal_reasoner", traceback.format_exc())
 
-        logger.info("All components loaded (Phase 1+2+3).")
-
-    except Exception as exc:
-        p3_err = traceback.format_exc()
-        logger.error("Phase 3 init failed (P1/P2 still running): %s", p3_err)
-        if _init_error:
-            _init_error += "\n--- Phase 3 ---\n" + p3_err
-        else:
-            _init_error = "Phase 3: " + p3_err
-
-    # ── Phase 4 (isolated — failures here don't affect P1/P2/P3) ──────
+    # ── Attention Schema ──────
     try:
         from attention_schema.schema import AttentionSchema as _AS
         from attention_schema.meta_cognition import MetaCognition as _MC
         from attention_schema.awareness import AwarenessEngine as _AE
-        from predictive_hierarchy.hierarchy import PredictiveHierarchy as _PH
-        from liquid_network.liquid_world_model import LiquidWorldModel as _LWM
-
-        # Attention Schema
         logger.info("Loading attention schema...")
         attention_schema = _AS()
         attention_meta = _MC(attention_schema)
         attention_awareness = _AE(attention_schema, attention_meta)
         _component_status["attention_schema"] = True
+        logger.info("Attention schema ready.")
+    except Exception:
+        _record_error("attention_schema", traceback.format_exc())
 
-        # Predictive Hierarchy
+    # ── Predictive Hierarchy ──────
+    try:
+        from predictive_hierarchy.hierarchy import PredictiveHierarchy as _PH
         pred_hierarchy = _PH()
         _component_status["predictive_hierarchy"] = True
+        logger.info("Predictive hierarchy ready.")
+    except Exception:
+        _record_error("predictive_hierarchy", traceback.format_exc())
 
-        # Liquid Network
+    # ── Liquid Network ──────
+    try:
+        from liquid_network.liquid_world_model import LiquidWorldModel as _LWM
         logger.info("Loading liquid network...")
         input_dim = embedder.dim if embedder else config.LTC_INPUT_SIZE
         liquid_model = _LWM(input_size=input_dim).to(config.DEVICE)
         _component_status["liquid_network"] = True
+        logger.info("Liquid network ready.")
+    except Exception:
+        _record_error("liquid_network", traceback.format_exc())
 
-        logger.info("All components loaded (Phase 1+2+3+4).")
-
-    except Exception as exc:
-        p4_err = traceback.format_exc()
-        logger.error("Phase 4 init failed (P1/P2/P3 still running): %s", p4_err)
-        if _init_error:
-            _init_error += "\n--- Phase 4 ---\n" + p4_err
-        else:
-            _init_error = "Phase 4: " + p4_err
+    loaded = sum(_component_status.values())
+    total = len(_component_status)
+    logger.info("Background init complete: %d/%d components loaded.", loaded, total)
 
 
 # ──────────────────────────────────────────────
