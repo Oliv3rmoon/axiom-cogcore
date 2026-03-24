@@ -198,5 +198,37 @@ async def _init_tables(db: aiosqlite.Connection):
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(cause, effect)
         );
+        -- Phase 4: Attention history
+        CREATE TABLE IF NOT EXISTS attention_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            attention_strength REAL NOT NULL,
+            signals TEXT,
+            duration_seconds REAL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Phase 4: Predictive hierarchy levels
+        CREATE TABLE IF NOT EXISTS prediction_levels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            level INTEGER NOT NULL,
+            level_name TEXT NOT NULL,
+            mean_error REAL DEFAULT 0,
+            precision REAL DEFAULT 1.0,
+            total_predictions INTEGER DEFAULT 0,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Phase 4: Prediction history
+        CREATE TABLE IF NOT EXISTS prediction_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            level INTEGER NOT NULL,
+            context TEXT,
+            predicted REAL NOT NULL,
+            actual REAL,
+            error REAL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     await db.commit()

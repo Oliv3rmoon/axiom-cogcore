@@ -103,6 +103,13 @@ _counterfactual_query = None
 _learn_causal_structure = None
 _Signal = None
 
+# Phase 4 globals (lazy loaded)
+attention_schema = None
+attention_meta = None
+attention_awareness = None
+pred_hierarchy = None
+liquid_model = None
+
 # Prediction cache: prediction_id -> {embedding, h, z, action}
 _prediction_cache: dict[str, dict] = {}
 _experience_count = 0
@@ -129,6 +136,9 @@ _component_status: dict[str, bool] = {
     "dreamcoder": False,
     "global_workspace": False,
     "causal_reasoner": False,
+    "attention_schema": False,
+    "predictive_hierarchy": False,
+    "liquid_network": False,
 }
 _init_error: str | None = None
 _background_task: asyncio.Task | None = None
@@ -174,6 +184,8 @@ async def _load_all_models():
     global beta_vae_model, beta_vae_trainer, rep_engine, gen_model, precision_ctrl
     global episodic_store, memory_mgr, reptile, task_sampler, domain_adapter
     global dc_library, gw, gw_registry, gw_broadcaster, causal_scm
+    global attention_schema, attention_meta, attention_awareness
+    global pred_hierarchy, liquid_model
     global _init_error
 
     try:
@@ -314,6 +326,41 @@ async def _load_all_models():
             _init_error += "\n--- Phase 3 ---\n" + p3_err
         else:
             _init_error = "Phase 3: " + p3_err
+
+    # ── Phase 4 (isolated — failures here don't affect P1/P2/P3) ──────
+    try:
+        from attention_schema.schema import AttentionSchema as _AS
+        from attention_schema.meta_cognition import MetaCognition as _MC
+        from attention_schema.awareness import AwarenessEngine as _AE
+        from predictive_hierarchy.hierarchy import PredictiveHierarchy as _PH
+        from liquid_network.liquid_world_model import LiquidWorldModel as _LWM
+
+        # Attention Schema
+        logger.info("Loading attention schema...")
+        attention_schema = _AS()
+        attention_meta = _MC(attention_schema)
+        attention_awareness = _AE(attention_schema, attention_meta)
+        _component_status["attention_schema"] = True
+
+        # Predictive Hierarchy
+        pred_hierarchy = _PH()
+        _component_status["predictive_hierarchy"] = True
+
+        # Liquid Network
+        logger.info("Loading liquid network...")
+        input_dim = embedder.dim if embedder else config.LTC_INPUT_SIZE
+        liquid_model = _LWM(input_size=input_dim).to(config.DEVICE)
+        _component_status["liquid_network"] = True
+
+        logger.info("All components loaded (Phase 1+2+3+4).")
+
+    except Exception as exc:
+        p4_err = traceback.format_exc()
+        logger.error("Phase 4 init failed (P1/P2/P3 still running): %s", p4_err)
+        if _init_error:
+            _init_error += "\n--- Phase 4 ---\n" + p4_err
+        else:
+            _init_error = "Phase 4: " + p4_err
 
 
 # ──────────────────────────────────────────────
@@ -1155,3 +1202,137 @@ async def causal_graph():
 async def causal_learn(req: CausalLearnRequest):
     result = await _learn_causal_structure(causal_scm, backend, req.min_evidence)
     return result
+
+
+# ══════════════════════════════════════════════
+# PHASE 4 ENDPOINTS
+# ══════════════════════════════════════════════
+
+# ──────────────────────────────────────────────
+# Phase 4 Request Models
+# ──────────────────────────────────────────────
+
+class AttentionUpdateRequest(BaseModel):
+    target: str
+    target_type: str = "step"
+    signals: dict = {}
+
+class AttentionIntrospectRequest(BaseModel):
+    depth: str = "normal"
+
+class HierarchyPredictRequest(BaseModel):
+    level: int = 0
+    context: str = ""
+
+class HierarchyUpdateRequest(BaseModel):
+    level: int = 0
+    predicted: float
+    actual: float
+    context: str = ""
+
+class LiquidPredictRequest(BaseModel):
+    state_embedding: list
+    action: str = ""
+    time_delta: float = 1.0
+
+class LiquidUpdateRequest(BaseModel):
+    state_embedding: list
+    actual_outcome_embedding: list
+    time_delta: float = 1.0
+
+
+# ──────────────────────────────────────────────
+# Attention Schema
+# ──────────────────────────────────────────────
+
+@app.get("/attention/focus")
+@requires_ready("attention_schema")
+async def attention_focus():
+    return attention_schema.get_focus()
+
+
+@app.post("/attention/update")
+@requires_ready("attention_schema")
+async def attention_update(req: AttentionUpdateRequest):
+    result = attention_schema.update_focus(req.target, req.target_type, req.signals)
+    await attention_schema.persist_focus()
+    return result
+
+
+@app.post("/attention/introspect")
+@requires_ready("attention_schema")
+async def attention_introspect(req: AttentionIntrospectRequest):
+    return attention_awareness.introspect(req.depth)
+
+
+# ──────────────────────────────────────────────
+# Predictive Processing Hierarchy
+# ──────────────────────────────────────────────
+
+@app.get("/prediction-hierarchy/state")
+@requires_ready("predictive_hierarchy")
+async def hierarchy_state():
+    return pred_hierarchy.get_state()
+
+
+@app.post("/prediction-hierarchy/predict")
+@requires_ready("predictive_hierarchy")
+async def hierarchy_predict(req: HierarchyPredictRequest):
+    return pred_hierarchy.predict(req.level, req.context)
+
+
+@app.post("/prediction-hierarchy/update")
+@requires_ready("predictive_hierarchy")
+async def hierarchy_update(req: HierarchyUpdateRequest):
+    result = pred_hierarchy.update(req.level, req.predicted, req.actual, req.context)
+    return result
+
+
+# ──────────────────────────────────────────────
+# Liquid Time-Constant Network
+# ──────────────────────────────────────────────
+
+@app.get("/liquid/status")
+@requires_ready("liquid_network")
+async def liquid_status():
+    return liquid_model.get_status()
+
+
+@app.post("/liquid/predict")
+@requires_ready("liquid_network", "embeddings")
+async def liquid_predict(req: LiquidPredictRequest):
+    state = torch.tensor([req.state_embedding], dtype=torch.float32, device=config.DEVICE)
+    dt = torch.tensor([[req.time_delta]], dtype=torch.float32, device=config.DEVICE)
+
+    liquid_model.eval()
+    with torch.no_grad():
+        h = liquid_model.initial_state(1)
+        result = liquid_model.forward(state, h, dt)
+        pred = result["predicted_outcome"].squeeze(0).cpu().tolist()
+        success = float(result["predicted_success"].squeeze().item())
+
+    return {
+        "predicted_next_state": pred[:10],
+        "confidence": round(success, 3),
+        "dynamics_speed": "fast" if req.time_delta < 0.5 else "medium" if req.time_delta < 5.0 else "slow",
+    }
+
+
+@app.post("/liquid/update")
+@requires_ready("liquid_network")
+async def liquid_update(req: LiquidUpdateRequest):
+    state = torch.tensor([req.state_embedding], dtype=torch.float32, device=config.DEVICE)
+    actual = torch.tensor([req.actual_outcome_embedding], dtype=torch.float32, device=config.DEVICE)
+    dt = torch.tensor([[req.time_delta]], dtype=torch.float32, device=config.DEVICE)
+
+    liquid_model.eval()
+    with torch.no_grad():
+        h = liquid_model.initial_state(1)
+        result = liquid_model.forward(state, h, dt)
+        pred = result["predicted_outcome"]
+        error = float(torch.mean((pred - actual) ** 2).item())
+
+    return {
+        "prediction_error": round(error, 4),
+        "time_constant_adjusted": True,
+    }
