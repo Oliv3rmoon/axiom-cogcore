@@ -561,9 +561,14 @@ async def wm_update(req: UpdateRequest):
     # Encode actual outcome
     actual_emb = embedder.embed(req.actual_outcome)
 
-    # Compute prediction error
+    # Compute prediction error (handle dimension mismatch between world model and embedder)
     pred_emb = cached["predicted_outcome_embedding"]
-    prediction_error = float(np.mean((pred_emb - actual_emb) ** 2))
+    if pred_emb.shape[0] != actual_emb.shape[0]:
+        # Project to smaller dimension for comparison
+        min_dim = min(pred_emb.shape[0], actual_emb.shape[0])
+        prediction_error = float(np.mean((pred_emb[:min_dim] - actual_emb[:min_dim]) ** 2))
+    else:
+        prediction_error = float(np.mean((pred_emb - actual_emb) ** 2))
 
     # Track accuracy
     if req.was_successful:
