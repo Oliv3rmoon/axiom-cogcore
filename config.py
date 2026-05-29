@@ -23,7 +23,9 @@ else:
 # World Model (GPU-scaled)
 WORLD_MODEL_HIDDEN_DIM = 512
 WORLD_MODEL_LATENT_DIM = 128
-WORLD_MODEL_OBS_DIM = 1024
+# Must match the embedder's output dim (bge-large=1024 on GPU, all-MiniLM=384 on CPU).
+# Railway runs CPU, so this is 384; mismatch here breaks the world-model encoder/decoder.
+WORLD_MODEL_OBS_DIM = 1024 if DEVICE == "cuda" else 384
 WORLD_MODEL_ACTION_DIM = 27
 WORLD_MODEL_LR = 3e-4
 WORLD_MODEL_BATCH_SIZE = 64
