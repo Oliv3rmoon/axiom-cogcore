@@ -1078,6 +1078,13 @@ class DreamcoderComposeRequest(BaseModel):
     task: str
     domain: str = ""
 
+class DreamcoderRecordRequest(BaseModel):
+    task: str
+    domain: str = ""
+    steps: list[str] = []
+    was_successful: bool = True
+    primitives_used: list[str] = []
+
 class WorkspaceBroadcastRequest(BaseModel):
     source_module: str
     signal_type: str
@@ -1152,6 +1159,27 @@ async def dreamcoder_library():
 async def dreamcoder_compose(req: DreamcoderComposeRequest):
     result = await _compose_solution(req.task, req.domain, dc_library, embedder)
     return result
+
+
+@app.post("/dreamcoder/record-solution")
+@requires_ready("dreamcoder")
+async def dreamcoder_record_solution(req: DreamcoderRecordRequest):
+    """Record a solved task (goal + executed step sequence) so the sleep phase
+    can abstract recurring step patterns into reusable library primitives."""
+    import uuid as _uuid, json as _json
+    if not req.steps:
+        return {"recorded": False, "reason": "no steps provided"}
+    db = await get_db()
+    await db.execute(
+        "INSERT INTO solved_tasks (id, task, domain, solution_steps, was_successful, primitives_used) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (str(_uuid.uuid4()), req.task, req.domain, _json.dumps(req.steps),
+         1 if req.was_successful else 0, _json.dumps(req.primitives_used)),
+    )
+    await db.commit()
+    cur = await db.execute("SELECT COUNT(*) FROM solved_tasks WHERE was_successful = 1")
+    total = (await cur.fetchone())[0]
+    return {"recorded": True, "total_solved_tasks": total}
 
 
 # ──────────────────────────────────────────────
