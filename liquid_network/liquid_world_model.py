@@ -41,6 +41,8 @@ class LiquidWorldModel(nn.Module):
         self._hidden_size = hidden_size
         self._input_size = input_size
         self._last_tau_mean = 1.0
+        self._train_steps = 0
+        self._optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
 
     def forward(self, obs: torch.Tensor, h: torch.Tensor,
                 time_delta: torch.Tensor) -> dict:
@@ -86,6 +88,20 @@ class LiquidWorldModel(nn.Module):
         total_recon /= seq_len
         return {"loss": total_recon, "recon_loss": total_recon}
 
+    def train_step(self, obs: torch.Tensor, outcome: torch.Tensor,
+                   time_delta: torch.Tensor) -> float:
+        """One real online gradient step on a single state->outcome pair.
+        obs, outcome: (batch, input_size); time_delta: (batch, 1)."""
+        self.train()
+        h = self.initial_state(obs.shape[0])
+        result = self.forward(obs, h, time_delta)
+        loss = F.mse_loss(result["predicted_outcome"], outcome)
+        self._optimizer.zero_grad()
+        loss.backward()
+        self._optimizer.step()
+        self._train_steps += 1
+        return float(loss.item())
+
     def initial_state(self, batch_size: int) -> torch.Tensor:
         return self.cfc.initial_state(batch_size)
 
@@ -96,5 +112,6 @@ class LiquidWorldModel(nn.Module):
             "hidden_size": self._hidden_size,
             "input_size": self._input_size,
             "total_parameters": total_params,
+            "train_steps": self._train_steps,
             "device": str(next(self.parameters()).device),
         }

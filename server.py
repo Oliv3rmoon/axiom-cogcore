@@ -588,6 +588,16 @@ async def wm_update(req: UpdateRequest):
     await trainer.buffer.add(exp)
     _experience_count += 1
 
+    # LIQUID NETWORK: real online gradient step on the same state->outcome pair (both 384-dim)
+    if liquid_model is not None:
+        try:
+            _st = torch.tensor([cached["state_embedding"]], dtype=torch.float32, device=config.DEVICE)
+            _ot = torch.tensor([actual_emb], dtype=torch.float32, device=config.DEVICE)
+            _dt = torch.tensor([[1.0]], dtype=torch.float32, device=config.DEVICE)
+            liquid_model.train_step(_st, _ot, _dt)
+        except Exception as _e:
+            logger.warning(f"[LIQUID] train step skipped: {_e}")
+
     # Record curiosity signal
     curiosity_result = curiosity_manager.record_experience(
         domain=req.action,
