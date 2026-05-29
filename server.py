@@ -1182,6 +1182,20 @@ async def dreamcoder_record_solution(req: DreamcoderRecordRequest):
     return {"recorded": True, "total_solved_tasks": total}
 
 
+@app.post("/dreamcoder/reset")
+@requires_ready("dreamcoder")
+async def dreamcoder_reset():
+    """Clear all solved tasks and the primitive library (DB + in-memory) so it can be rebuilt purely from real solved goals."""
+    db = await get_db()
+    await db.execute("DELETE FROM solved_tasks")
+    await db.execute("DELETE FROM library_primitives")
+    await db.commit()
+    n = len(dc_library.primitives)
+    dc_library.primitives.clear()
+    dc_library._embeddings.clear()
+    return {"reset": True, "cleared_in_memory_primitives": n}
+
+
 # ──────────────────────────────────────────────
 # Global Workspace
 # ──────────────────────────────────────────────
