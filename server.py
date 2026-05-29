@@ -59,6 +59,7 @@ domain_adapter = None
 
 # Phase 3 globals (types are not imported at module level — lazy loaded)
 dc_library = None
+dc_engine = None
 gw = None
 gw_registry = None
 gw_broadcaster = None
@@ -161,7 +162,7 @@ async def _load_all_models():
     global reasoning_ws, state_tracker, capability_model, transition_model
     global beta_vae_model, beta_vae_trainer, rep_engine, gen_model, precision_ctrl
     global episodic_store, memory_mgr, reptile, task_sampler, domain_adapter
-    global dc_library, gw, gw_registry, gw_broadcaster, causal_scm
+    global dc_library, dc_engine, gw, gw_registry, gw_broadcaster, causal_scm
     global attention_schema, attention_meta, attention_awareness
     global pred_hierarchy, liquid_model
     global np, torch
@@ -317,6 +318,9 @@ async def _load_all_models():
         logger.info("Loading DreamCoder library...")
         dc_library = _DreamcoderLibrary(embedder)
         await dc_library.load_from_db()
+        from dreamcoder.engine import DreamCoderEngine as _DCEngine
+        dc_engine = _DCEngine(embedder)
+        await dc_engine.load()
         _component_status["dreamcoder"] = True
         logger.info("DreamCoder ready.")
     except Exception:
@@ -1127,38 +1131,25 @@ async def dreamcoder_wake(req: DreamcoderWakeRequest):
     task_text = req.task
     if req.context:
         task_text += " " + req.context
-    result = _wake_solve(task_text, dc_library, embedder)
-    return result
+    return dc_engine.compose(task_text)
 
 
 @app.post("/dreamcoder/sleep")
 @requires_ready("dreamcoder", "embeddings")
 async def dreamcoder_sleep_endpoint(req: DreamcoderSleepRequest):
-    new_prims = await _abstraction_sleep(dc_library, embedder, backend, req.min_solutions)
-    total = dc_library.size
-    return {
-        "new_primitives": [p.to_dict() for p in new_prims],
-        "library_size": total,
-        "compression_ratio": round(len(new_prims) / max(1, total), 3),
-    }
+    return await dc_engine.sleep()
 
 
 @app.get("/dreamcoder/library")
 @requires_ready("dreamcoder")
 async def dreamcoder_library():
-    prims = [p.to_dict() for p in dc_library.primitives.values()]
-    prims.sort(key=lambda p: p["frequency"], reverse=True)
-    return {
-        "primitives": prims,
-        "total": len(prims),
-    }
+    return dc_engine.library_view()
 
 
 @app.post("/dreamcoder/compose")
 @requires_ready("dreamcoder", "embeddings")
 async def dreamcoder_compose(req: DreamcoderComposeRequest):
-    result = await _compose_solution(req.task, req.domain, dc_library, embedder)
-    return result
+    return dc_engine.compose(req.task)
 
 
 @app.post("/dreamcoder/record-solution")
@@ -1190,10 +1181,8 @@ async def dreamcoder_reset():
     await db.execute("DELETE FROM solved_tasks")
     await db.execute("DELETE FROM library_primitives")
     await db.commit()
-    n = len(dc_library.primitives)
-    dc_library.primitives.clear()
-    dc_library._embeddings.clear()
-    return {"reset": True, "cleared_in_memory_primitives": n}
+    await dc_engine.reset()
+    return {"reset": True}
 
 
 # ──────────────────────────────────────────────
