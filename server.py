@@ -66,6 +66,7 @@ basal_ganglia = None  # Basal Ganglia: learned action selection (brain/basal_gan
 candidate_selector = None  # Basal Ganglia value head over (context, candidate)
 cingulate = None  # Cingulate: real NLI contradiction monitor (brain/cingulate.py)
 insula = None  # Insula: interoceptive integrator -> sampling temperature (brain/insula.py)
+ras = None  # RAS: arousal-gated salience filter over perception channels (brain/ras.py)
 gw = None
 gw_registry = None
 gw_broadcaster = None
@@ -315,6 +316,7 @@ async def _load_all_models():
     global basal_ganglia
     global cingulate
     global insula
+    global ras
     global candidate_selector
 
     # ── DreamCoder ──────
@@ -382,6 +384,17 @@ async def _load_all_models():
         logger.info("Insula ready (base_temp=%s).", insula.base_temp)
     except Exception:
         _record_error("insula", traceback.format_exc())
+
+    # ── RAS (arousal-gated attention over perception channels) ──────
+    try:
+        logger.info("Loading RAS (salience gate)...")
+        from brain.ras import get_ras
+        ras = get_ras(embedder.embed)
+        ras.gate("warmup", [{"name": "c1", "text": "hello"}], arousal=0.5)
+        _component_status["ras"] = True
+        logger.info("RAS ready (base_k=%d).", ras.base_k)
+    except Exception:
+        _record_error("ras", traceback.format_exc())
 
     # ── Global Workspace ──────
     try:
@@ -1073,6 +1086,19 @@ async def brain_insula_peek():
     if insula is None:
         return {"ready": False}
     return insula.peek()
+
+class RasGateRequest(BaseModel):
+    context: str = ""
+    channels: list = []
+    arousal: float = 0.5
+    base_k: Optional[int] = None
+
+
+@app.post("/brain/ras")
+@requires_ready("ras")
+async def brain_ras(req: RasGateRequest):
+    """Salience gate: admit the top-K most context-relevant perception channels (K narrows with arousal)."""
+    return ras.gate(req.context, list(req.channels or []), arousal=req.arousal, base_k=req.base_k)
 
 
 @app.post("/beta-vae/encode")
