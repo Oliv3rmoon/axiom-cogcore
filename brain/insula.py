@@ -16,10 +16,11 @@ import os
 
 
 class Insula:
-    def __init__(self, base_temp=0.7, k=0.5, tmin=0.45, tmax=1.05,
+    def __init__(self, base_temp=0.7, k=2.5, a_ref=0.40, tmin=0.45, tmax=1.05,
                  momentum=0.5, decay=0.10, path=None):
         self.base_temp = float(base_temp)
         self.k = float(k)
+        self.a_ref = float(a_ref)  # felt-arousal operating midpoint (calibrated to amygdala VA range)
         self.tmin = float(tmin)
         self.tmax = float(tmax)
         self.momentum = float(momentum)   # how much prior felt arousal carries over
@@ -31,8 +32,8 @@ class Insula:
         self._load()
 
     def _temp(self, A):
-        # A=0.5 -> base; A=1 -> base+k; A=0 -> base-k; then clamp to [tmin, tmax]
-        t = self.base_temp + self.k * (A - 0.5) * 2.0
+        # centered on the felt-arousal operating point; steep enough to span a usable temp range
+        t = self.base_temp + self.k * (A - self.a_ref)
         return min(self.tmax, max(self.tmin, t))
 
     def sense(self, arousal=0.5, valence=0.0, drive=0.0, update=True, reset=False):
