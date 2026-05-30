@@ -2,6 +2,7 @@ from __future__ import annotations
 """AXIOM Cognitive Core v2 — FastAPI server with all endpoints."""
 
 import asyncio
+import os
 import logging
 import uuid
 import json
@@ -61,6 +62,7 @@ domain_adapter = None
 dc_library = None
 dc_engine = None
 amygdala = None  # Amygdala: real emotion classifier (brain/amygdala.py)
+basal_ganglia = None  # Basal Ganglia: learned action selection (brain/basal_ganglia.py)
 gw = None
 gw_registry = None
 gw_broadcaster = None
@@ -307,6 +309,7 @@ async def _load_all_models():
     global _wake_solve, _abstraction_sleep, _compose_solution
     global _do_intervention, _counterfactual_query, _learn_causal_structure, _Signal
     global amygdala
+    global basal_ganglia
 
     # ── DreamCoder ──────
     try:
@@ -338,6 +341,17 @@ async def _load_all_models():
         logger.info("Amygdala ready (labels=%s).", amygdala.labels)
     except Exception:
         _record_error("amygdala", traceback.format_exc())
+
+    # ── Basal Ganglia (learned action selection) ──────
+    try:
+        logger.info("Loading Basal Ganglia (action-selection value fn)...")
+        from brain.basal_ganglia import BasalGanglia
+        _bg_path = "/app/data/basal_ganglia.npz" if os.path.isdir("/app/data") else None
+        basal_ganglia = BasalGanglia(embedder.embed, embedder.dim, path=_bg_path)
+        _component_status["basal_ganglia"] = True
+        logger.info("Basal Ganglia ready (actions=%s, updates=%d).", basal_ganglia.ACTIONS, basal_ganglia.n_updates)
+    except Exception:
+        _record_error("basal_ganglia", traceback.format_exc())
 
     # ── Global Workspace ──────
     try:
@@ -936,6 +950,39 @@ class AmygdalaRequest(BaseModel):
 async def brain_amygdala(req: AmygdalaRequest):
     """Real emotion appraisal — a dedicated neural net, not a prompt."""
     return amygdala.read(req.text)
+
+
+class BGSelectRequest(BaseModel):
+    text: str = ""
+    explore: bool = True
+
+
+class BGRewardRequest(BaseModel):
+    text: str = ""
+    action: str = ""
+    reward: float = 0.0
+
+
+@app.post("/brain/basal-ganglia/select")
+@requires_ready("basal_ganglia")
+async def brain_bg_select(req: BGSelectRequest):
+    """Gate which response program to release, by learned value (Go/NoGo)."""
+    return basal_ganglia.select(req.text, explore=req.explore)
+
+
+@app.post("/brain/basal-ganglia/reward")
+@requires_ready("basal_ganglia")
+async def brain_bg_reward(req: BGRewardRequest):
+    """Reinforce or suppress the action taken, from its emotional consequence."""
+    return basal_ganglia.reward(req.text, req.action, req.reward)
+
+
+@app.get("/brain/basal-ganglia/state")
+async def brain_bg_state():
+    if basal_ganglia is None:
+        return {"ready": False}
+    return {"actions": basal_ganglia.ACTIONS, "n_updates": basal_ganglia.n_updates,
+            "epsilon": basal_ganglia.epsilon, "lr": basal_ganglia.lr, "dim": basal_ganglia.dim}
 
 
 @app.post("/beta-vae/encode")
