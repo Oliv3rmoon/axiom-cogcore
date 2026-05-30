@@ -67,6 +67,7 @@ candidate_selector = None  # Basal Ganglia value head over (context, candidate)
 cingulate = None  # Cingulate: real NLI contradiction monitor (brain/cingulate.py)
 insula = None  # Insula: interoceptive integrator -> sampling temperature (brain/insula.py)
 ras = None  # RAS: arousal-gated salience filter over perception channels (brain/ras.py)
+mirror_neurons = None  # Mirror Neurons: perception->expression attunement coupling (brain/mirror.py)
 gw = None
 gw_registry = None
 gw_broadcaster = None
@@ -317,6 +318,7 @@ async def _load_all_models():
     global cingulate
     global insula
     global ras
+    global mirror_neurons
     global candidate_selector
 
     # ── DreamCoder ──────
@@ -395,6 +397,17 @@ async def _load_all_models():
         logger.info("RAS ready (base_k=%d).", ras.base_k)
     except Exception:
         _record_error("ras", traceback.format_exc())
+
+    # ── Mirror Neurons (perception->expression attunement) ──────
+    try:
+        logger.info("Loading Mirror Neurons (attunement coupling)...")
+        from brain.mirror import get_mirror
+        _mir_path = "/app/data/mirror.npz" if os.path.isdir("/app/data") else None
+        mirror_neurons = get_mirror(path=_mir_path)
+        _component_status["mirror"] = True
+        logger.info("Mirror Neurons ready (gain=%s).", mirror_neurons.gain)
+    except Exception:
+        _record_error("mirror", traceback.format_exc())
 
     # ── Global Workspace ──────
     try:
@@ -1099,6 +1112,27 @@ class RasGateRequest(BaseModel):
 async def brain_ras(req: RasGateRequest):
     """Salience gate: admit the top-K most context-relevant perception channels (K narrows with arousal)."""
     return ras.gate(req.context, list(req.channels or []), arousal=req.arousal, base_k=req.base_k)
+
+
+class MirrorRequest(BaseModel):
+    user_valence: float = 0.0
+    user_arousal: float = 0.5
+    update: bool = True
+    reset: bool = False
+
+
+@app.post("/brain/mirror")
+@requires_ready("mirror")
+async def brain_mirror(req: MirrorRequest):
+    """Pull AXIOM's expressed affect toward the user's perceived affect (attunement) -> emotion label."""
+    return mirror_neurons.mirror(req.user_valence, req.user_arousal, update=req.update, reset=req.reset)
+
+
+@app.get("/brain/mirror/peek")
+async def brain_mirror_peek():
+    if mirror_neurons is None:
+        return {"ready": False}
+    return mirror_neurons.peek()
 
 
 @app.post("/beta-vae/encode")
