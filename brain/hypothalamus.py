@@ -23,15 +23,17 @@ class Hypothalamus:
         "a factual question about the external world",
         "information about science, technology, history, or current events",
         "wanting to learn or find out facts about a specific topic",
+        "the latest news or recent developments about a subject",
     ]
     INTERNAL_ANCHORS = [
         "sharing personal feelings and emotions",
         "talking about a relationship or how someone is feeling",
         "casual social small talk, greetings, and chit-chat",
+        "expressing thanks, laughter, or simple acknowledgment",
     ]
 
     def __init__(self, embed_fn, embed_batch_fn=None, threshold=0.5, ext_scale=4.0,
-                 novelty_floor=0.4, path=None):
+                 novelty_floor=0.25, path=None):
         self.embed_fn = embed_fn
         self.embed_batch_fn = embed_batch_fn
         self.threshold = float(threshold)
