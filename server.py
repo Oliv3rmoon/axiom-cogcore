@@ -1127,6 +1127,24 @@ async def brain_ras(req: RasGateRequest):
     return ras.gate(req.context, list(req.channels or []), arousal=req.arousal, base_k=req.base_k)
 
 
+class EmbedRequest(BaseModel):
+    texts: list = []
+
+
+@app.post("/brain/embed")
+async def brain_embed(req: EmbedRequest):
+    """Raw sentence embeddings for a batch of texts. Used by the Global Workspace to bind
+    associated proposals into coalitions (embedding cosine + affect alignment)."""
+    if embedder is None:
+        return {"ready": False, "vectors": []}
+    texts = [str(t) for t in (req.texts or [])]
+    if not texts:
+        return {"ready": True, "vectors": [], "dim": 0}
+    vecs = embedder.embed_batch(texts)
+    dim = int(vecs.shape[1]) if hasattr(vecs, "shape") and len(getattr(vecs, "shape", [])) > 1 else 0
+    return {"ready": True, "vectors": vecs.tolist(), "dim": dim}
+
+
 class MirrorRequest(BaseModel):
     user_valence: float = 0.0
     user_arousal: float = 0.5
