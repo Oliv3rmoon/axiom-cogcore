@@ -68,6 +68,7 @@ cingulate = None  # Cingulate: real NLI contradiction monitor (brain/cingulate.p
 insula = None  # Insula: interoceptive integrator -> sampling temperature (brain/insula.py)
 ras = None  # RAS: arousal-gated salience filter over perception channels (brain/ras.py)
 mirror_neurons = None  # Mirror Neurons: perception->expression attunement coupling (brain/mirror.py)
+hypothalamus = None  # Hypothalamus: curiosity drive -> proactive search gate (brain/hypothalamus.py)
 gw = None
 gw_registry = None
 gw_broadcaster = None
@@ -319,6 +320,7 @@ async def _load_all_models():
     global insula
     global ras
     global mirror_neurons
+    global hypothalamus
     global candidate_selector
 
     # ── DreamCoder ──────
@@ -408,6 +410,17 @@ async def _load_all_models():
         logger.info("Mirror Neurons ready (gain=%s).", mirror_neurons.gain)
     except Exception:
         _record_error("mirror", traceback.format_exc())
+
+    # ── Hypothalamus (curiosity drive -> proactive search gate) ──────
+    try:
+        logger.info("Loading Hypothalamus (curiosity drive)...")
+        from brain.hypothalamus import get_hypothalamus
+        hypothalamus = get_hypothalamus(embedder.embed, embedder.embed_batch)
+        hypothalamus.assess("warmup", ["x"])
+        _component_status["hypothalamus"] = True
+        logger.info("Hypothalamus ready (threshold=%s).", hypothalamus.threshold)
+    except Exception:
+        _record_error("hypothalamus", traceback.format_exc())
 
     # ── Global Workspace ──────
     try:
@@ -1133,6 +1146,19 @@ async def brain_mirror_peek():
     if mirror_neurons is None:
         return {"ready": False}
     return mirror_neurons.peek()
+
+
+class HypothalamusRequest(BaseModel):
+    text: str = ""
+    context: list = []
+    threshold: Optional[float] = None
+
+
+@app.post("/brain/hypothalamus")
+@requires_ready("hypothalamus")
+async def brain_hypothalamus(req: HypothalamusRequest):
+    """Curiosity drive: decide whether to fire a proactive search (externality x novelty gate)."""
+    return hypothalamus.assess(req.text, context=list(req.context or []), threshold=req.threshold)
 
 
 @app.post("/beta-vae/encode")
