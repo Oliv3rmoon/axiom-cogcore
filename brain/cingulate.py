@@ -1,19 +1,18 @@
 """
 Cingulate — contradiction / conflict monitor.
 
-The anterior cingulate's job here is NOT to phrase anything. It is a dedicated
-Natural Language Inference net (entailment / neutral / CONTRADICTION) that scores
-whether a new statement conflicts with things said earlier. When contradiction is
-detected the controller raises an INTERRUPT — it stops the reflexive answer and
-forces a re-evaluation pass that must surface the discrepancy.
+A dedicated Natural Language Inference net (entailment / neutral / CONTRADICTION)
+scores whether a new statement asserts the OPPOSITE of an earlier claim. NLI alone
+mistakes "topically unrelated" for "contradiction", so we gate it with embedding
+similarity: a genuine contradiction must be the opposite claim ABOUT THE SAME SUBJECT.
+contradiction := nli_contradiction >= threshold  AND  cos_sim(statement, prior) >= sim_threshold
 
-This is a real mechanism (a separate classifier), not a prompt. It loads the first
-NLI model that will actually load in this environment (safetensors-friendly,
-no sentencepiece dependency), preferring the smaller one.
+When contradiction is detected the controller raises an INTERRUPT — it stops the
+reflexive answer and forces a re-evaluation that surfaces the discrepancy. This is a
+real mechanism (a classifier + a similarity gate), not a prompt.
 """
 import os, time
 
-# Persist weights on the Railway volume if present (same pattern as the amygdala).
 if os.path.isdir("/app/data"):
     os.environ.setdefault("HF_HOME", "/app/data/hf")
 
@@ -24,10 +23,12 @@ _CANDIDATES = [
 
 
 class Cingulate:
-    def __init__(self, threshold: float = 0.55):
+    def __init__(self, threshold: float = 0.55, sim_threshold: float = 0.40, embed_fn=None):
         import torch
         from transformers import AutoTokenizer, AutoModelForSequenceClassification
         self.threshold = float(threshold)
+        self.sim_threshold = float(sim_threshold)
+        self.embed_fn = embed_fn
         self._torch = torch
         last = None
         for mid in _CANDIDATES:
@@ -41,7 +42,7 @@ class Cingulate:
                 self.id2label, self.contra_idx = id2, contra
                 self.model_id = mid
                 break
-            except Exception as e:  # format block / missing dep / network → try next
+            except Exception as e:
                 last = e
                 continue
         else:
@@ -55,37 +56,57 @@ class Cingulate:
         probs = self._torch.softmax(logits, dim=-1)
         return float(probs[self.contra_idx])
 
+    def _embed(self, text: str):
+        import numpy as np
+        v = np.asarray(self.embed_fn(text), dtype=float)
+        return v[0] if v.ndim > 1 else v
+
+    @staticmethod
+    def _cos(a, b) -> float:
+        import numpy as np
+        na, nb = np.linalg.norm(a), np.linalg.norm(b)
+        if na == 0 or nb == 0:
+            return 0.0
+        return float(np.dot(a, b) / (na * nb))
+
     def check(self, statement: str, against, threshold: float = None):
-        """Score `statement` against each prior claim; return the strongest conflict.
-        NLI is directional, so we take the max over both orderings."""
+        """Opposite claim (NLI) AND same subject (embedding sim) => contradiction."""
         t0 = time.time()
         thr = self.threshold if threshold is None else float(threshold)
         statement = (statement or "").strip()
-        priors = [p for p in (against or [])]
-        scores = []
+        priors = [(p or "").strip() for p in (against or [])]
+        s_vec = self._embed(statement) if (self.embed_fn and statement) else None
+        rows = []
         for p in priors:
-            ps = (p or "").strip()
-            if not ps or not statement:
-                scores.append(0.0); continue
-            s = max(self._contra(ps, statement), self._contra(statement, ps))
-            scores.append(round(s, 4))
-        best_i = max(range(len(scores)), key=lambda i: scores[i]) if scores else -1
-        best = scores[best_i] if best_i >= 0 else 0.0
+            if not p or not statement:
+                rows.append({"nli": 0.0, "sim": 0.0}); continue
+            nli = max(self._contra(p, statement), self._contra(statement, p))
+            sim = self._cos(s_vec, self._embed(p)) if s_vec is not None else 1.0
+            rows.append({"nli": round(nli, 4), "sim": round(sim, 4)})
+        flagged = [(i, r) for i, r in enumerate(rows)
+                   if r["nli"] >= thr and r["sim"] >= self.sim_threshold]
+        if flagged:
+            best_i, best = max(flagged, key=lambda ir: ir[1]["nli"]); contradiction = True
+        elif rows:
+            best_i = max(range(len(rows)), key=lambda i: rows[i]["nli"])
+            best = rows[best_i]; contradiction = False
+        else:
+            best_i, best, contradiction = -1, {"nli": 0.0, "sim": 0.0}, False
         return {
-            "contradiction": bool(best >= thr),
-            "score": round(float(best), 4),
-            "threshold": thr,
+            "contradiction": bool(contradiction),
+            "score": best["nli"], "sim": best["sim"],
+            "threshold": thr, "sim_threshold": self.sim_threshold,
             "with_index": best_i,
             "with_statement": (priors[best_i] if best_i >= 0 else None),
-            "scores": scores,
-            "model": self.model_id,
-            "ms": int((time.time() - t0) * 1000),
+            "nli_scores": [r["nli"] for r in rows],
+            "sims": [r["sim"] for r in rows],
+            "model": self.model_id, "ms": int((time.time() - t0) * 1000),
         }
 
 
 _cingulate = None
-def get_cingulate(threshold: float = 0.55):
+def get_cingulate(threshold: float = 0.55, sim_threshold: float = 0.40, embed_fn=None):
     global _cingulate
     if _cingulate is None:
-        _cingulate = Cingulate(threshold=threshold)
+        _cingulate = Cingulate(threshold=threshold, sim_threshold=sim_threshold, embed_fn=embed_fn)
     return _cingulate

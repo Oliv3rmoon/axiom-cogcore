@@ -363,7 +363,7 @@ async def _load_all_models():
     try:
         logger.info("Loading Cingulate NLI net...")
         from brain.cingulate import get_cingulate
-        cingulate = get_cingulate()
+        cingulate = get_cingulate(embed_fn=embedder.embed)
         cingulate.check("I love this project", ["I hate this project"])  # warmup
         _component_status["cingulate"] = True
         logger.info("Cingulate ready (model=%s).", cingulate.model_id)
