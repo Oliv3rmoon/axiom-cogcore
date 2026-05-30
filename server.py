@@ -63,6 +63,7 @@ dc_library = None
 dc_engine = None
 amygdala = None  # Amygdala: real emotion classifier (brain/amygdala.py)
 basal_ganglia = None  # Basal Ganglia: learned action selection (brain/basal_ganglia.py)
+candidate_selector = None  # Basal Ganglia value head over (context, candidate)
 gw = None
 gw_registry = None
 gw_broadcaster = None
@@ -310,6 +311,7 @@ async def _load_all_models():
     global _do_intervention, _counterfactual_query, _learn_causal_structure, _Signal
     global amygdala
     global basal_ganglia
+    global candidate_selector
 
     # ── DreamCoder ──────
     try:
@@ -345,9 +347,11 @@ async def _load_all_models():
     # ── Basal Ganglia (learned action selection) ──────
     try:
         logger.info("Loading Basal Ganglia (action-selection value fn)...")
-        from brain.basal_ganglia import BasalGanglia
+        from brain.basal_ganglia import BasalGanglia, CandidateSelector
         _bg_path = "/app/data/basal_ganglia.npz" if os.path.isdir("/app/data") else None
+        _bg_sel_path = "/app/data/basal_selector.npz" if os.path.isdir("/app/data") else None
         basal_ganglia = BasalGanglia(embedder.embed, embedder.dim, path=_bg_path)
+        candidate_selector = CandidateSelector(embedder.embed, embedder.dim, path=_bg_sel_path)
         _component_status["basal_ganglia"] = True
         logger.info("Basal Ganglia ready (actions=%s, updates=%d).", basal_ganglia.ACTIONS, basal_ganglia.n_updates)
     except Exception:
@@ -983,6 +987,32 @@ async def brain_bg_state():
         return {"ready": False}
     return {"actions": basal_ganglia.ACTIONS, "n_updates": basal_ganglia.n_updates,
             "epsilon": basal_ganglia.epsilon, "lr": basal_ganglia.lr, "dim": basal_ganglia.dim}
+
+
+class BGScoreRequest(BaseModel):
+    context: str = ""
+    candidates: list = []
+    explore: bool = True
+
+
+class BGLearnRequest(BaseModel):
+    context: str = ""
+    candidate: str = ""
+    reward: float = 0.0
+
+
+@app.post("/brain/basal-ganglia/score")
+@requires_ready("basal_ganglia")
+async def brain_bg_score(req: BGScoreRequest):
+    """Value head scores candidate replies; releases the best (Go), suppresses the rest (NoGo)."""
+    return candidate_selector.score(req.context, list(req.candidates), explore=req.explore)
+
+
+@app.post("/brain/basal-ganglia/learn")
+@requires_ready("basal_ganglia")
+async def brain_bg_learn(req: BGLearnRequest):
+    """Reinforce or suppress the chosen candidate by its affective consequence."""
+    return candidate_selector.learn(req.context, req.candidate, req.reward)
 
 
 @app.post("/beta-vae/encode")

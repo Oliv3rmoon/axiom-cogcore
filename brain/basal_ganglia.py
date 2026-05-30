@@ -104,6 +104,84 @@ def get_basal_ganglia(embed_fn=None, dim=384, path=None):
     return _singleton
 
 
+class CandidateSelector:
+    """Value head over (context, candidate). The cortex proposes candidate replies; this
+    head scores the ACTUAL generated candidates and releases the best (Go), suppressing the
+    rest (NoGo). Linear over phi = [ctx, cand, ctx*cand] — the multiplicative term lets it
+    learn context-dependent candidate preferences. Learns online from reward; persists."""
+
+    def __init__(self, embed_fn, dim, path=None, lr=0.1, epsilon=0.0, seed=0):
+        self.embed_fn = embed_fn
+        self.dim = int(dim)
+        self.fdim = 3 * self.dim
+        self.path = path
+        self.lr = float(lr)
+        self.epsilon = float(epsilon)
+        self.rng = np.random.default_rng(seed)
+        self.w = np.zeros(self.fdim, dtype=np.float32)
+        self.n_updates = 0
+        if path and os.path.exists(path):
+            try: self.load()
+            except Exception: pass
+        self.ready = True
+
+    def _emb(self, t):
+        v = np.asarray(self.embed_fn(t or ""), dtype=np.float32).reshape(-1)
+        if v.shape[0] != self.dim:
+            out = np.zeros(self.dim, dtype=np.float32)
+            n = min(self.dim, v.shape[0]); out[:n] = v[:n]; v = out
+        nrm = np.linalg.norm(v)
+        return v / nrm if nrm > 1e-8 else v
+
+    def _phi(self, c, x):
+        return np.concatenate([c, x, c * x]).astype(np.float32)
+
+    def value(self, context, candidate):
+        return float(self.w @ self._phi(self._emb(context), self._emb(candidate)))
+
+    def score(self, context, candidates, explore=True):
+        c = self._emb(context)
+        vals = [float(self.w @ self._phi(c, self._emb(cand))) for cand in candidates]
+        if explore and len(candidates) and self.rng.random() < self.epsilon:
+            best = int(self.rng.integers(len(candidates))); explored = True
+        else:
+            best = int(np.argmax(vals)) if vals else 0; explored = False
+        return {"values": [round(v, 4) for v in vals], "best_index": best,
+                "explore": explored, "n_updates": self.n_updates}
+
+    def learn(self, context, candidate, reward):
+        phi = self._phi(self._emb(context), self._emb(candidate))
+        pred = float(self.w @ phi)
+        r = float(max(-1.0, min(1.0, reward)))
+        self.w += self.lr * (r - pred) * phi
+        new = float(self.w @ phi)
+        self.n_updates += 1
+        if self.path:
+            try: self.save()
+            except Exception: pass
+        return {"reward": r, "value_before": round(pred, 4),
+                "value_after": round(new, 4), "n_updates": self.n_updates}
+
+    def save(self):
+        np.savez(self.path, w=self.w, n=np.array([self.n_updates]))
+
+    def load(self):
+        d = np.load(self.path)
+        if d["w"].shape == self.w.shape:
+            self.w = d["w"].astype(np.float32)
+            self.n_updates = int(d["n"][0]) if "n" in d.files else 0
+
+
+_selector_singleton = None
+
+
+def get_candidate_selector(embed_fn=None, dim=384, path=None):
+    global _selector_singleton
+    if _selector_singleton is None:
+        _selector_singleton = CandidateSelector(embed_fn or (lambda t: _hash_embed(t, dim)), dim, path=path)
+    return _selector_singleton
+
+
 if __name__ == "__main__":
     dim = 64
     bg = BasalGanglia(lambda t: _hash_embed(t, dim), dim, path=None, epsilon=0.0, seed=1)
