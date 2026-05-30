@@ -65,6 +65,7 @@ amygdala = None  # Amygdala: real emotion classifier (brain/amygdala.py)
 basal_ganglia = None  # Basal Ganglia: learned action selection (brain/basal_ganglia.py)
 candidate_selector = None  # Basal Ganglia value head over (context, candidate)
 cingulate = None  # Cingulate: real NLI contradiction monitor (brain/cingulate.py)
+insula = None  # Insula: interoceptive integrator -> sampling temperature (brain/insula.py)
 gw = None
 gw_registry = None
 gw_broadcaster = None
@@ -313,6 +314,7 @@ async def _load_all_models():
     global amygdala
     global basal_ganglia
     global cingulate
+    global insula
     global candidate_selector
 
     # ── DreamCoder ──────
@@ -369,6 +371,17 @@ async def _load_all_models():
         logger.info("Cingulate ready (model=%s).", cingulate.model_id)
     except Exception:
         _record_error("cingulate", traceback.format_exc())
+
+    # ── Insula (interoceptive self-state -> sampling temperature) ──────
+    try:
+        logger.info("Loading Insula (interoceptive integrator)...")
+        from brain.insula import get_insula
+        _ins_path = "/app/data/insula.npz" if os.path.isdir("/app/data") else None
+        insula = get_insula(path=_ins_path)
+        _component_status["insula"] = True
+        logger.info("Insula ready (base_temp=%s).", insula.base_temp)
+    except Exception:
+        _record_error("insula", traceback.format_exc())
 
     # ── Global Workspace ──────
     try:
@@ -1038,6 +1051,28 @@ class CingulateRequest(BaseModel):
 async def brain_cingulate(req: CingulateRequest):
     """Conflict monitor — a dedicated NLI net flags contradiction with prior claims."""
     return cingulate.check(req.statement, list(req.against or []), threshold=req.threshold)
+
+class InsulaSenseRequest(BaseModel):
+    arousal: float = 0.5
+    valence: float = 0.0
+    drive: float = 0.0
+    update: bool = True
+    reset: bool = False
+
+
+@app.post("/brain/insula/sense")
+@requires_ready("insula")
+async def brain_insula_sense(req: InsulaSenseRequest):
+    """Integrate interoceptive afferents into felt arousal -> real sampling temperature."""
+    return insula.sense(arousal=req.arousal, valence=req.valence, drive=req.drive,
+                        update=req.update, reset=req.reset)
+
+
+@app.get("/brain/insula/peek")
+async def brain_insula_peek():
+    if insula is None:
+        return {"ready": False}
+    return insula.peek()
 
 
 @app.post("/beta-vae/encode")
