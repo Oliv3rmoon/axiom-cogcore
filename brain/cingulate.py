@@ -23,7 +23,7 @@ _CANDIDATES = [
 
 
 class Cingulate:
-    def __init__(self, threshold: float = 0.55, sim_threshold: float = 0.40, embed_fn=None):
+    def __init__(self, threshold: float = 0.55, sim_threshold: float = 0.25, embed_fn=None):
         import torch
         from transformers import AutoTokenizer, AutoModelForSequenceClassification
         self.threshold = float(threshold)
@@ -105,7 +105,7 @@ class Cingulate:
 
 
 _cingulate = None
-def get_cingulate(threshold: float = 0.55, sim_threshold: float = 0.40, embed_fn=None):
+def get_cingulate(threshold: float = 0.55, sim_threshold: float = 0.25, embed_fn=None):
     global _cingulate
     if _cingulate is None:
         _cingulate = Cingulate(threshold=threshold, sim_threshold=sim_threshold, embed_fn=embed_fn)
