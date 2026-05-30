@@ -32,7 +32,7 @@ class Hypothalamus:
         "expressing thanks, laughter, or simple acknowledgment",
     ]
 
-    def __init__(self, embed_fn, embed_batch_fn=None, threshold=0.5, ext_scale=4.0,
+    def __init__(self, embed_fn, embed_batch_fn=None, threshold=0.55, ext_scale=4.0,
                  novelty_floor=0.25, path=None):
         self.embed_fn = embed_fn
         self.embed_batch_fn = embed_batch_fn
