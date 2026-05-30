@@ -64,6 +64,7 @@ dc_engine = None
 amygdala = None  # Amygdala: real emotion classifier (brain/amygdala.py)
 basal_ganglia = None  # Basal Ganglia: learned action selection (brain/basal_ganglia.py)
 candidate_selector = None  # Basal Ganglia value head over (context, candidate)
+cingulate = None  # Cingulate: real NLI contradiction monitor (brain/cingulate.py)
 gw = None
 gw_registry = None
 gw_broadcaster = None
@@ -311,6 +312,7 @@ async def _load_all_models():
     global _do_intervention, _counterfactual_query, _learn_causal_structure, _Signal
     global amygdala
     global basal_ganglia
+    global cingulate
     global candidate_selector
 
     # ── DreamCoder ──────
@@ -356,6 +358,17 @@ async def _load_all_models():
         logger.info("Basal Ganglia ready (actions=%s, updates=%d).", basal_ganglia.ACTIONS, basal_ganglia.n_updates)
     except Exception:
         _record_error("basal_ganglia", traceback.format_exc())
+
+    # ── Cingulate (real NLI contradiction monitor) ──────
+    try:
+        logger.info("Loading Cingulate NLI net...")
+        from brain.cingulate import get_cingulate
+        cingulate = get_cingulate()
+        cingulate.check("I love this project", ["I hate this project"])  # warmup
+        _component_status["cingulate"] = True
+        logger.info("Cingulate ready (model=%s).", cingulate.model_id)
+    except Exception:
+        _record_error("cingulate", traceback.format_exc())
 
     # ── Global Workspace ──────
     try:
@@ -1013,6 +1026,18 @@ async def brain_bg_score(req: BGScoreRequest):
 async def brain_bg_learn(req: BGLearnRequest):
     """Reinforce or suppress the chosen candidate by its affective consequence."""
     return candidate_selector.learn(req.context, req.candidate, req.reward)
+
+class CingulateRequest(BaseModel):
+    statement: str = ""
+    against: list = []
+    threshold: Optional[float] = None
+
+
+@app.post("/brain/cingulate")
+@requires_ready("cingulate")
+async def brain_cingulate(req: CingulateRequest):
+    """Conflict monitor — a dedicated NLI net flags contradiction with prior claims."""
+    return cingulate.check(req.statement, list(req.against or []), threshold=req.threshold)
 
 
 @app.post("/beta-vae/encode")
