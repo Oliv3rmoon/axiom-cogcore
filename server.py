@@ -389,7 +389,7 @@ async def _load_all_models():
     try:
         logger.info("Loading RAS (salience gate)...")
         from brain.ras import get_ras
-        ras = get_ras(embedder.embed)
+        ras = get_ras(embedder.embed, embedder.embed_batch)
         ras.gate("warmup", [{"name": "c1", "text": "hello"}], arousal=0.5)
         _component_status["ras"] = True
         logger.info("RAS ready (base_k=%d).", ras.base_k)
