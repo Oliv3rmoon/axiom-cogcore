@@ -60,6 +60,7 @@ domain_adapter = None
 # Phase 3 globals (types are not imported at module level — lazy loaded)
 dc_library = None
 dc_engine = None
+amygdala = None  # Amygdala: real emotion classifier (brain/amygdala.py)
 gw = None
 gw_registry = None
 gw_broadcaster = None
@@ -305,6 +306,7 @@ async def _load_all_models():
 
     global _wake_solve, _abstraction_sleep, _compose_solution
     global _do_intervention, _counterfactual_query, _learn_causal_structure, _Signal
+    global amygdala
 
     # ── DreamCoder ──────
     try:
@@ -325,6 +327,17 @@ async def _load_all_models():
         logger.info("DreamCoder ready.")
     except Exception:
         _record_error("dreamcoder", traceback.format_exc())
+
+    # ── Amygdala (real emotion classifier) ──────
+    try:
+        logger.info("Loading Amygdala emotion net...")
+        from brain.amygdala import get_amygdala
+        amygdala = get_amygdala(device="cpu")
+        amygdala.read("warmup")
+        _component_status["amygdala"] = True
+        logger.info("Amygdala ready (labels=%s).", amygdala.labels)
+    except Exception:
+        _record_error("amygdala", traceback.format_exc())
 
     # ── Global Workspace ──────
     try:
@@ -913,6 +926,17 @@ class MetaTrainStepRequest(BaseModel):
 # ──────────────────────────────────────────────
 # β-VAE — Disentangled Representations
 # ──────────────────────────────────────────────
+
+class AmygdalaRequest(BaseModel):
+    text: str = ""
+
+
+@app.post("/brain/amygdala")
+@requires_ready("amygdala")
+async def brain_amygdala(req: AmygdalaRequest):
+    """Real emotion appraisal — a dedicated neural net, not a prompt."""
+    return amygdala.read(req.text)
+
 
 @app.post("/beta-vae/encode")
 @requires_ready("beta_vae")
